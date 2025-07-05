@@ -1,0 +1,4 @@
+/target
+
+# cargo-tarpaulin code coverage report
+tarpaulin-report.html

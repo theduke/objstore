@@ -1,0 +1,22 @@
+[package]
+name = "objstore_test"
+version = "0.1.0"
+authors.workspace = true
+keywords.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+edition.workspace = true
+
+[dependencies]
+objstore.workspace = true
+
+tokio = { workspace = true, features = ["macros", "rt"] }
+uuid = { workspace = true, features = ["v4"] }
+bytes.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
+time.workspace = true
+
+pretty_assertions = "1.4.1"

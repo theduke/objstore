@@ -1,0 +1,30 @@
+[package]
+name = "objstore"
+version = "0.1.0"
+authors.workspace = true
+keywords.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+edition.workspace = true
+# rust-version.workspace = true
+
+[features]
+default = ["tracing"]
+
+# Enables the TracedObjStore wrapper, which uses the `tracing` to log operations.
+tracing = ["dep:tracing"]
+
+[dependencies]
+async-trait.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+time.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+futures.workspace = true
+
+tracing = { workspace = true, optional = true}
+
+serde_path_to_error = "0.1"

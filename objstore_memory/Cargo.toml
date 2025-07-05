@@ -1,0 +1,26 @@
+[package]
+name = "objstore_memory"
+version = "0.1.0"
+authors.workspace = true
+keywords.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+edition.workspace = true
+
+[dependencies]
+objstore = { path = "../objstore", version = "0.1.0" }
+
+bytes.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+anyhow.workspace = true
+async-trait.workspace = true
+sha2.workspace = true
+futures.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+objstore_test = { path = "../objstore_test" }
+
+tokio = { workspace = true, features = ["rt", "macros"] }

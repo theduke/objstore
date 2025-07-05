@@ -1,0 +1,30 @@
+[package]
+name = "objstore_fs"
+version = "0.1.0"
+authors.workspace = true
+keywords.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+edition.workspace = true
+
+[dependencies]
+objstore = { path = "../objstore", version = "0.1.0" }
+
+bytes.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["io-util", "fs"] }
+anyhow.workspace = true
+async-trait.workspace = true
+sha2.workspace = true
+serde = { workspace = true, features = ["derive"] }
+futures.workspace = true
+url.workspace = true
+
+tokio-util = { version = "0.7.15", features = ["io"] }
+
+[dev-dependencies]
+objstore_test = { path = "../objstore_test" }
+
+tokio = { workspace = true, features = ["rt", "macros", "fs"] }
+tempfile = "3.20.0"
