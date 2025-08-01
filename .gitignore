@@ -2,3 +2,4 @@
 
 # cargo-tarpaulin code coverage report
 tarpaulin-report.html
+.direnv/
