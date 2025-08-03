@@ -26,6 +26,8 @@ pub struct ObjectMeta {
     pub created_at: Option<OffsetDateTime>,
     pub updated_at: Option<OffsetDateTime>,
     pub hash_sha256: Option<[u8; 32]>,
+    /// Optional MIME content type of the object.
+    pub mime_type: Option<String>,
 
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -39,6 +41,7 @@ impl ObjectMeta {
             created_at: None,
             updated_at: None,
             hash_sha256: None,
+            mime_type: None,
             extra: HashMap::new(),
         }
     }

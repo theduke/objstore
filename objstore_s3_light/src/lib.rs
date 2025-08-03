@@ -93,7 +93,15 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
     meta.size = Some(size);
     meta.created_at = None;
     meta.updated_at = Some(last_modified);
-    // FIXME: created at, hashes, other attributes
+    // Extract content type if available
+    if let Some(v) = headers.get(http::header::CONTENT_TYPE) {
+        let ct = v
+            .to_str()
+            .context("invalid content-type header")?
+            .to_string();
+        meta.mime_type = Some(ct);
+    }
+    // FIXME: hashes, other attributes
 
     Ok(meta)
 }
