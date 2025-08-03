@@ -28,7 +28,8 @@ tokio = { version = "1", optional = true, features = ["rt-multi-thread"] }
 tracing = "0.1"
 futures = "0.3"
 dioxus-free-icons = { version = "0.10.0-alpha.1", features = ["font-awesome-solid", "font-awesome-brands"] }
+hex = "0.4.3"
+url = "2"
 
 [lints.cargo]
 non_snake_case = "allow"
-

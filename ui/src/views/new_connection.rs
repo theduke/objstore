@@ -72,6 +72,7 @@ pub fn NewConnection() -> Element {
             on_cancel: move |_| {
                 use_navigator().push(Route::Home {  });
             },
+            initial_value: None,
         }
     }
 }

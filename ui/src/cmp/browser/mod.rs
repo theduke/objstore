@@ -1,33 +1,44 @@
+mod browser_settings_form;
 mod table;
 
 use std::sync::Arc;
 
 use dioxus::{core::Task, prelude::*};
+use dioxus_bulma::Modal;
 use futures::StreamExt as _;
 use objstore::{ListArgs, ObjectMeta};
 
 use crate::{
     cmp::{
+        object::{
+            download_modal::DownloadModal, object_creator::ObjectCreator, viewer::ObjectViewer,
+        },
         object_delete_modal::ObjectDeleteModal,
-        object::download_modal::DownloadModal,
         util::loader::{LoadState, Spinner},
     },
     context::ActiveStore,
 };
 
+use browser_settings_form::BrowserSettingsForm;
 use table::ObjectsTable;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ModalView {
     DeleteObject { meta: Arc<ObjectMeta> },
     DownloadObject { meta: Arc<ObjectMeta> },
+    ViewObject { meta: Arc<ObjectMeta> },
+    CreateObject { base_path: String },
 }
 
 enum Msg {
     GotoPath(String),
     Download(Arc<ObjectMeta>),
     DeleteObject(Arc<ObjectMeta>),
+    ViewObject(Arc<ObjectMeta>),
     ObjectDeleted { key: String },
+    CreateObject { base_path: String },
+    ObjectCreated { meta: Arc<ObjectMeta> },
+    LoadMore,
 }
 
 #[derive(Default)]
@@ -46,6 +57,9 @@ pub fn Browser(store: ActiveStore) -> Element {
     let mut load_state = use_signal::<LoadState<()>>(|| LoadState::Idle);
     let mut page = use_signal::<Page>(|| Page::default());
     let mut modal_view = use_signal::<Option<ModalView>>(|| None);
+    let mut manual_pagination = use_signal(|| true);
+    let mut pagination_size = use_signal(|| 250u64);
+    let mut show_settings = use_signal(|| false);
 
     let tx = use_coroutine::<Msg, _, _>({
         let store = store.store.clone();
@@ -54,53 +68,62 @@ pub fn Browser(store: ActiveStore) -> Element {
             async move {
                 let mut task: Option<Task> = None;
 
-                let mut load = |args: ListArgs| {
-                    if let Some(t) = task.take() {
-                        t.cancel();
-                    }
-
-                    path.set(args.prefix().map(|p| p.to_owned()).unwrap_or_default());
-
+                let mut load = {
                     let store = store.clone();
-                    let f = spawn(async move {
-                        let args = args.with_delimiter('/');
+                    move |args: ListArgs, extend: bool| {
+                        let args = args.with_limit(pagination_size());
+                        if let Some(t) = task.take() {
+                            t.cancel();
+                        }
 
-                        tracing::info!("Loading page with args: {args:?}");
-                        load_state.set(LoadState::Loading);
-                        let res = store.list(args).await;
-                        tracing::info!("Page loaded, result: {res:?}");
-                        match res {
-                            Ok(objects_page) => {
-                                tracing::info!(
-                                    "Loaded page, items: {}, prefixes: {}",
-                                    objects_page.items.len(),
-                                    objects_page.prefixes.as_ref().map_or(0, |p| p.len())
-                                );
-                                let new_page = Page {
-                                    objects: objects_page
-                                        .items
-                                        .into_iter()
-                                        .map(|meta| Arc::new(meta))
-                                        .collect(),
-                                    prefixes: objects_page.prefixes,
-                                    next_cursor: objects_page.next_cursor.clone(),
-                                };
+                        path.set(args.prefix().map(|p| p.to_owned()).unwrap_or_default());
 
-                                next_cursor.set(objects_page.next_cursor.clone());
-                                page.set(new_page);
-                                load_state.set(LoadState::Loaded(Ok(())));
-                            }
-                            Err(err) => {
-                                tracing::error!("Error loading page: {err}");
-                                load_state.set(LoadState::Loaded(Err(err.to_string())));
-                            }
-                        };
-                    });
-                    task = Some(f);
+                        let store = store.clone();
+                        let f = spawn(async move {
+                            let args = args.with_delimiter('/');
+
+                            tracing::info!("Loading page with args: {args:?}");
+                            load_state.set(LoadState::Loading);
+                            let res = store.list(args).await;
+                            match res {
+                                Ok(new_page) => {
+                                    tracing::info!(
+                                        "Loaded page, items: {}, prefixes: {}",
+                                        new_page.items.len(),
+                                        new_page.prefixes.as_ref().map_or(0, |p| p.len())
+                                    );
+
+                                    next_cursor.set(new_page.next_cursor.clone());
+                                    let objects =
+                                        new_page.items.into_iter().map(|meta| Arc::new(meta));
+
+                                    if extend {
+                                        let mut old_page = page.write_unchecked();
+                                        old_page.objects.extend(objects);
+                                        old_page.next_cursor = new_page.next_cursor;
+                                    } else {
+                                        let new_page = Page {
+                                            objects: objects.collect(),
+                                            prefixes: new_page.prefixes,
+                                            next_cursor: new_page.next_cursor.clone(),
+                                        };
+                                        page.set(new_page);
+                                    }
+
+                                    load_state.set(LoadState::Loaded(Ok(())));
+                                }
+                                Err(err) => {
+                                    tracing::error!("Error loading page: {err}");
+                                    load_state.set(LoadState::Loaded(Err(err.to_string())));
+                                }
+                            };
+                        });
+                        task = Some(f);
+                    }
                 };
 
                 // TODO: respect URL path!
-                load(ListArgs::new());
+                load(ListArgs::new().with_limit(pagination_size()), false);
 
                 while let Some(msg) = rx.next().await {
                     match msg {
@@ -115,11 +138,47 @@ pub fn Browser(store: ActiveStore) -> Element {
                             if !path.ends_with('/') {
                                 path.push('/');
                             }
-                            let args = ListArgs::new().with_prefix(path);
-                            load(args)
+                            let args = ListArgs::new()
+                                .with_prefix(path)
+                                .with_limit(pagination_size());
+                            load(args, false)
                         }
                         Msg::Download(meta) => {
                             modal_view.set(Some(ModalView::DownloadObject { meta }));
+                        }
+                        Msg::ViewObject(meta) => {
+                            modal_view.set(Some(ModalView::ViewObject { meta }));
+                        }
+                        Msg::CreateObject { base_path } => {
+                            modal_view.set(Some(ModalView::CreateObject { base_path }));
+                        }
+                        Msg::LoadMore => {
+                            if let Some(cursor) = { page.read_unchecked().next_cursor.clone() } {
+                                let prefix = path.read_unchecked().clone();
+                                let args = ListArgs::new()
+                                    .with_prefix(prefix)
+                                    .with_cursor(cursor)
+                                    .with_limit(pagination_size());
+                                load(args, true)
+                            }
+                        }
+                        Msg::ObjectCreated { meta } => {
+                            let mut page = page.write_unchecked();
+                            let path = path.read_unchecked().clone();
+                            let key = meta.key.clone();
+                            if key.starts_with(&path) {
+                                let rest = &key[path.len()..];
+                                if !rest.contains('/') {
+                                    page.objects.push(meta.clone());
+                                } else if let Some(prefixes) = page.prefixes.as_mut() {
+                                    let next = rest.split_once('/').unwrap().0;
+                                    let full = format!("{}{}/", path, next);
+                                    if !prefixes.contains(&full) {
+                                        prefixes.push(full);
+                                        prefixes.sort();
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -167,6 +226,38 @@ pub fn Browser(store: ActiveStore) -> Element {
                     }
                 }
             }
+            ModalView::ViewObject { meta } => {
+                rsx! {
+                    Modal {
+                        on_close: move || {
+                            modal_view.set(None);
+                        },
+                        ObjectViewer {
+                            meta: meta.clone(),
+                        }
+                    }
+                }
+            }
+            ModalView::CreateObject { base_path } => {
+                rsx! {
+                    Modal {
+                        on_close: move || {
+                            modal_view.set(None);
+                        },
+                        ObjectCreator {
+                            store: store.store.clone(),
+                            base_path: base_path.clone(),
+                            on_complete: move |meta| {
+                                modal_view.set(None);
+                                tx.send(Msg::ObjectCreated { meta });
+                            },
+                            on_cancel: move || {
+                                modal_view.set(None);
+                            },
+                        }
+                    }
+                }
+            }
         }
     });
 
@@ -211,6 +302,63 @@ pub fn Browser(store: ActiveStore) -> Element {
 
     let now = time::OffsetDateTime::now_utc();
 
+    let action_bar = rsx! {
+
+        div {
+            class: "buttons mt-2 mb-2",
+
+            button {
+                class: "button mb-2 ml-2",
+                title: "Refresh",
+                aria_label: "Refresh",
+                onclick: {
+                    let current = path.read_unchecked().clone();
+                    move |_| {
+                        tx.send(Msg::GotoPath(current.clone()));
+                    }
+                },
+                dioxus_free_icons::Icon {
+                    fill: "black",
+                    width: 20,
+                    height: 20,
+                    icon: dioxus_free_icons::icons::fa_solid_icons::FaArrowsRotate,
+                }
+            }
+
+            button {
+                class: "button mb-2",
+                title: "Create Object",
+                aria_label: "Create Object",
+                onclick: {
+                    let base = path.read_unchecked().clone();
+                    move |_| {
+                        tx.send(Msg::CreateObject { base_path: base.clone() });
+                    }
+                },
+                dioxus_free_icons::Icon {
+                    fill: "black",
+                    width: 20,
+                    height: 20,
+                    icon: dioxus_free_icons::icons::fa_solid_icons::FaFileCirclePlus,
+                }
+            }
+
+            button {
+                class: if show_settings() { "button mb-2 is-active" } else { "button mb-2" },
+                title: "Settings",
+                aria_label: "Settings",
+                onclick: move |_| show_settings.set(!show_settings()),
+                dioxus_free_icons::Icon {
+                    fill: "black",
+                    width: 20,
+                    height: 20,
+                    icon: dioxus_free_icons::icons::fa_solid_icons::FaGear,
+                }
+            }
+        }
+
+    };
+
     let contents = {
         match &*load_state.read() {
             LoadState::Loading => {
@@ -225,7 +373,6 @@ pub fn Browser(store: ActiveStore) -> Element {
                 let page_data = page.read();
 
                 rsx! {
-
                     if let Some(prefixes) = page_data.prefixes.as_ref().filter(|p| !p.is_empty()) {
                         div {
                             for prefix in prefixes {
@@ -259,12 +406,15 @@ pub fn Browser(store: ActiveStore) -> Element {
                     if page_data.objects.is_empty() {
                         div {
                             class: "notification",
-                            "No items found."
+                            "No objects found."
                         }
                     } else {
                         ObjectsTable {
                             page,
                             now: now,
+                            on_view: move |item| {
+                                tx.send(Msg::ViewObject(item));
+                            },
                             on_download: move |item| {
                                 tx.send(Msg::Download(item));
                             },
@@ -299,10 +449,38 @@ pub fn Browser(store: ActiveStore) -> Element {
                 {breadcrumbs}
             }
 
+            {action_bar}
+
+            if show_settings() {
+                div { class: "box",
+                    BrowserSettingsForm {
+                        initial_pagination: manual_pagination(),
+                        initial_pagination_size: pagination_size(),
+                        on_change_pagination: move |val| {
+                            manual_pagination.set(val);
+                        },
+                        on_change_pagination_size: move |val| {
+                            pagination_size.set(val);
+                        },
+                        on_close: move |_| {
+                            show_settings.set(false);
+                        },
+                    }
+                }
+            }
+
             div {
                 div {
                     class: "box",
                     {contents}
+                }
+                // Manual pagination: Load more button
+                if manual_pagination() && next_cursor().is_some() {
+                    button {
+                        class: "button is-fullwidth is-link",
+                        onclick: move |_| tx.send(Msg::LoadMore),
+                        "Load more"
+                    }
                 }
             }
         }

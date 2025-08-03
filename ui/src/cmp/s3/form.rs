@@ -2,7 +2,8 @@ use anyhow::{bail, Context};
 use dioxus::prelude::*;
 use dioxus_bulma::{Color, Notification};
 use objstore_config::ConnectionConfig;
-use objstore_s3_light::UrlStyle;
+use objstore_s3_light::{S3ObjStoreConfig, UrlStyle};
+use url::Url;
 
 use crate::cmp::{s3::ConnectionPersistence, util::form::FormSubmit};
 
@@ -11,14 +12,54 @@ pub fn S3Form(
     on_submit: EventHandler<(ConnectionConfig, ConnectionPersistence)>,
     on_cancel: EventHandler<()>,
     status: ReadOnlySignal<FormSubmit>,
+    initial_value: Option<ReadOnlySignal<S3ObjStoreConfig>>,
 ) -> Element {
     let mut errors = use_signal::<Option<Vec<String>>>(|| None);
 
     let mut value_name = use_signal(|| String::new());
-    let mut value_url = use_signal(|| String::new());
-    let mut value_bucket = use_signal(|| String::new());
-    let mut value_access_key_id = use_signal(|| String::new());
-    let mut value_secret_access_key = use_signal(|| String::new());
+    let mut value_url = use_signal(|| {
+        initial_value
+            .as_ref()
+            .map(|v| v.peek_unchecked().url.to_string())
+            .unwrap_or_default()
+    });
+    let mut value_bucket = use_signal(|| {
+        initial_value
+            .as_ref()
+            .map(|v| v.peek_unchecked().bucket.clone())
+            .unwrap_or_default()
+    });
+    let mut value_access_key_id = use_signal(|| {
+        initial_value
+            .as_ref()
+            .map(|v| v.peek_unchecked().key.clone())
+            .unwrap_or_default()
+    });
+    let mut value_secret_access_key = use_signal(|| {
+        initial_value
+            .as_ref()
+            .map(|v| v.peek_unchecked().secret.clone())
+            .unwrap_or_default()
+    });
+
+    let mut value_region = use_signal(|| {
+        initial_value
+            .as_ref()
+            .map(|v| v.peek_unchecked().region.clone())
+            .unwrap_or_else(|| "auto".to_string())
+    });
+    let mut value_path_prefix = use_signal(|| {
+        initial_value
+            .as_ref()
+            .and_then(|c| c.peek_unchecked().path_prefix.clone())
+            .unwrap_or_default()
+    });
+    let mut value_path_style = use_signal(|| {
+        initial_value
+            .as_ref()
+            .map(|v| v.peek_unchecked().path_style)
+            .unwrap_or(UrlStyle::Path)
+    });
 
     let submit = Callback::<ConnectionPersistence>::new(move |persist: ConnectionPersistence| {
         if status.read().is_loading() {
@@ -40,15 +81,33 @@ pub fn S3Form(
                 .parse()
                 .with_context(|| format!("invalid url '{}'", url_raw))?;
 
+            let region_str = value_region().trim().to_string();
+            let region = if region_str.is_empty() {
+                "auto".to_string()
+            } else {
+                region_str
+            };
+
+            let path_prefix = {
+                let prefix = value_path_prefix().trim().to_string();
+                if prefix.is_empty() {
+                    None
+                } else {
+                    Some(prefix)
+                }
+            };
+
+            let path_style = value_path_style();
+
             let s = objstore_s3_light::S3ObjStoreConfig {
                 url,
                 bucket: value_bucket(),
-                region: "auto".to_string(),
-                path_style: UrlStyle::Path,
+                region,
+                path_style,
                 key: value_access_key_id(),
                 secret: value_secret_access_key(),
                 token: None,
-                path_prefix: None,
+                path_prefix,
             };
             s.validate()?;
 
@@ -200,6 +259,82 @@ pub fn S3Form(
                         onchange: move |e| {
                             value_secret_access_key.set(e.value());
                         },
+                    }
+                }
+            }
+
+            div {
+                class: "field",
+
+                label {
+                    class: "label",
+                    "Region (optional)"
+                }
+
+                div {
+                    class: "control",
+                    input {
+                        class: "input",
+                        r#type: "text",
+                        placeholder: "Enter region (e.g. us-east-1)",
+                        value: "{value_region}",
+                        onchange: move |e| value_region.set(e.value()),
+                    }
+                }
+            }
+
+            div {
+                class: "field",
+
+                label {
+                    class: "label",
+                    "Path Style"
+                }
+
+                div {
+                    class: "control",
+                    div {
+                        class: "select",
+                        select {
+                            value: "{value_path_style:?}",
+                            onchange: move |e| {
+                                match e.value().as_str() {
+                                    "path" => value_path_style.set(UrlStyle::Path),
+                                    "virtualhost" => value_path_style.set(UrlStyle::VirtualHost),
+                                    _ => (),
+                                }
+                            },
+                            option {
+                                value: "path",
+                                selected: value_path_style() == UrlStyle::Path,
+                                "Path style"
+                            }
+                            option {
+                                value: "virtualhost",
+                                selected: value_path_style() == UrlStyle::VirtualHost,
+                                "Virtual host (subdomains)"
+                            }
+                        }
+                    }
+                }
+            }
+
+            div {
+                class: "field",
+
+                label {
+                    class: "label",
+                    "Path Prefix (optional)"
+                }
+
+                div {
+                    class: "control",
+                    input {
+                        class: "input",
+                        r#type: "text",
+                        placeholder: "Enter path prefix",
+                        value: "{value_path_prefix}",
+                        onchange: move |e| value_path_prefix.set(e.value()),
                     }
                 }
             }

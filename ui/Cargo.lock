@@ -2985,6 +2985,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "bytes",
  "futures",
  "http",
@@ -4966,12 +4967,14 @@ dependencies = [
  "dioxus-bulma",
  "dioxus-free-icons",
  "futures",
+ "hex",
  "objstore",
  "objstore_config",
  "objstore_s3_light",
  "time",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

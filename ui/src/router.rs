@@ -15,7 +15,7 @@ pub enum Route {
         #[route("/connections/new")]
         NewConnection {},
 
-        #[route("/browse/:store")]
+        #[route("/connections/:store/browser")]
         Browser {
             store: String,
         }

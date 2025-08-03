@@ -11,6 +11,7 @@ pub fn ObjectsTable(
     now: OffsetDateTime,
     on_download: EventHandler<Arc<ObjectMeta>>,
     on_delete: EventHandler<Arc<ObjectMeta>>,
+    on_view: EventHandler<Arc<ObjectMeta>>,
 ) -> Element {
     let page = page.read();
 
@@ -43,7 +44,15 @@ pub fn ObjectsTable(
                                 name
                             };
                             rsx! {
-                                td { "{display_name}" }
+                                td {
+                                    class: "has-text-link",
+                                    style: "cursor: pointer;",
+                                    onclick: {
+                                        let item = item.clone();
+                                        move |_| on_view.call(item.clone())
+                                    },
+                                    "{display_name}"
+                                }
                             }
                         }
 
