@@ -9,6 +9,7 @@ use objstore::{ListArgs, ObjectMeta};
 use crate::{
     cmp::{
         object_delete_modal::ObjectDeleteModal,
+        object::download_modal::DownloadModal,
         util::loader::{LoadState, Spinner},
     },
     context::ActiveStore,
@@ -19,6 +20,7 @@ use table::ObjectsTable;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ModalView {
     DeleteObject { meta: Arc<ObjectMeta> },
+    DownloadObject { meta: Arc<ObjectMeta> },
 }
 
 enum Msg {
@@ -117,24 +119,7 @@ pub fn Browser(store: ActiveStore) -> Element {
                             load(args)
                         }
                         Msg::Download(meta) => {
-                            tracing::info!("starting object download: {}", &meta.key);
-                            let size = meta.size;
-                            let on_progress: crate::store::DownloadProgressCallback =
-                                Box::new(move |size: u64| {});
-                            match crate::store::download_object(&store, &meta, None, on_progress)
-                                .await
-                            {
-                                Ok(()) => {
-                                    tracing::info!(
-                                        "Object download started successfully: {}",
-                                        meta.key
-                                    );
-                                }
-                                Err(err) => {
-                                    tracing::error!("Failed to start object download: {}", err);
-                                    // TODO: show error toas!
-                                }
-                            }
+                            modal_view.set(Some(ModalView::DownloadObject { meta }));
                         }
                     }
                 }
@@ -161,6 +146,20 @@ pub fn Browser(store: ActiveStore) -> Element {
                                     key: key.clone(),
                                 });
                             }
+                        },
+                        on_cancel: move || {
+                            modal_view.set(None);
+                        },
+                    }
+                }
+            }
+            ModalView::DownloadObject { meta } => {
+                rsx! {
+                    DownloadModal {
+                        store: store.store.clone(),
+                        object_meta: meta.clone(),
+                        on_complete: move || {
+                            modal_view.set(None);
                         },
                         on_cancel: move || {
                             modal_view.set(None);

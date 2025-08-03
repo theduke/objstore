@@ -1,6 +1,23 @@
+use anyhow::Context;
+use dioxus::core::Callback;
 use objstore::{DynObjStore, ObjectMeta};
+use std::path::PathBuf;
 
-pub type DownloadProgressCallback = Box<dyn Fn(u64) + Send + Sync>;
+pub type DownloadProgressCallback = Callback<u64>;
+
+/// Returns the default directory for object downloads.
+pub fn default_download_dir() -> Result<PathBuf, anyhow::Error> {
+    #[cfg(feature = "desktop")]
+    {
+        let home_dir = std::env::home_dir().context("Failed to determine home directory")?;
+        let dir = home_dir.join("Downloads");
+        Ok(dir)
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        bail!("Default download directory not implemented for this platform");
+    }
+}
 
 pub async fn download_object(
     store: &DynObjStore,
@@ -62,7 +79,7 @@ async fn download_object_desktop(
     while let Some(chunk) = stream.try_next().await? {
         progress += chunk.len() as u64;
         writer.write_all(&chunk).await?;
-        on_progress(progress);
+        on_progress.call(progress);
     }
     {
         writer.flush().await?;
