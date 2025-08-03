@@ -270,7 +270,6 @@ pub async fn test_objstore(store: &impl ObjStore) {
 
     // with prefix
     let nested_prefix = format!("{}/{}", prefix, &key1_name[0..5]);
-    dbg!(&meta1.key, &nested_prefix);
     let mut items = store
         .list(ListArgs::new().with_prefix(&nested_prefix))
         .await

@@ -1,38 +1,55 @@
 [workspace]
 resolver = "2"
 members = [
-    "./objstore",
+    "objstore",
+    "objstore_config",
+    "objstore_fs",
     "objstore_fs",
     "objstore_memory",
-    "objstore_fs",
-    "objstore_s3_light", "objstore_test", "examples",
+    "objstore_s3_light",
+    "objstore_test",
+
+    "examples",
+]
+exclude = [
+    "ui",
 ]
 
 [workspace.package]
 authors = ["Christoph Herzog <chris@theduke.at>"]
-keywords = ["objectstore", "kvstore", "s3"]
-repository = "https://github.com/theduke/objstore"
-license = "MIT OR Apache-2.0"
 readme = "README.md"
+keywords = [
+    "objectstore",
+    "kvstore",
+    "s3",
+]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/theduke/objstore"
 edition = "2024"
 
-# categories = []
-# Commented out - we don't want this repo to show up on crates.io.
-# repository = "https://github.com/wasmerio/edge"
-
 [workspace.dependencies]
-objstore = { path = "./objstore", version = "0.1.0" }
-
+anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
-time = "0.3.41"
-anyhow = "1"
-serde = "1"
-serde_json = "1"
-tokio = { version = "1", features = ["sync", "rt"] }
-uuid = "1"
-sha2 = "0.10"
-tracing = "0.1"
-url = { version = "2.5.4" }
 futures = "0.3"
 pretty_assertions = "1.4.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = "0.3.41"
+tracing = "0.1"
+uuid = "1"
+
+[workspace.dependencies.objstore]
+version = "0.1.0"
+path = "./objstore"
+
+[workspace.dependencies.tokio]
+version = "1"
+features = [
+    "sync",
+    "rt",
+]
+
+[workspace.dependencies.url]
+version = "2.5.4"
