@@ -319,6 +319,8 @@ pub struct PutBuilder<'a, S> {
     store: &'a S,
     key: String,
     conditions: Conditions,
+    /// Specifies the MIME type of the data.
+    mime_type: Option<String>,
 }
 
 impl<'a, S: ObjStore> PutBuilder<'a, S>
@@ -328,20 +330,21 @@ where
     pub fn build(self, data: impl Into<DataSource>) -> Put {
         let mut put = Put::new(self.key, data.into());
         put.conditions = self.conditions;
+        put.mime_type = self.mime_type;
         put
     }
 
     pub async fn json<T: serde::Serialize>(self, data: &T) -> Result<ObjectMeta, anyhow::Error> {
         let data = serde_json::to_vec(data).context("could not serialize JSON data for put")?;
-        let mut put = Put::new(self.key, DataSource::Data(Bytes::from(data)));
-        put.conditions = self.conditions;
-        self.store.send_put(put).await
+        let store = self.store;
+        let put = self.build(DataSource::Data(Bytes::from(data)));
+        store.send_put(put).await
     }
 
     pub async fn send(self, data: impl Into<DataSource>) -> Result<ObjectMeta, anyhow::Error> {
-        let mut put = Put::new(self.key, data.into());
-        put.conditions = self.conditions;
-        self.store.send_put(put).await
+        let store = self.store;
+        let put = self.build(data);
+        store.send_put(put).await
     }
 
     pub async fn text(self, text: impl Into<String>) -> Result<ObjectMeta, anyhow::Error> {
@@ -407,6 +410,7 @@ where
             store: self,
             key: key.to_string(),
             conditions: Conditions::default(),
+            mime_type: None,
         }
     }
     /// Begin a copy operation from `src` to `dest`, allows setting conditions.

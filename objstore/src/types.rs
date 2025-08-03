@@ -364,6 +364,8 @@ pub struct Put {
     pub key: String,
     pub data: DataSource,
     pub conditions: Conditions,
+    /// Optional MIME type to associate with the object.
+    pub mime_type: Option<String>,
 }
 
 /// Request to copy an object from one key to another.
@@ -396,6 +398,7 @@ impl Put {
             key: key.into(),
             data: data.into(),
             conditions: Conditions::default(),
+            mime_type: None,
         }
     }
 }

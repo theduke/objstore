@@ -17,7 +17,7 @@ use rusty_s3::{Bucket, S3Action, actions::ListObjectsV2Response};
 
 use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
-use http::header::ETAG;
+use http::header::{CONTENT_TYPE, ETAG};
 use rusty_s3::actions::{CompleteMultipartUpload, CreateMultipartUpload, UploadPart};
 use time::{OffsetDateTime, UtcOffset};
 
@@ -283,6 +283,10 @@ impl S3ObjStore {
             .bucket
             .put_object(Some(&self.state.creds), &s3_key);
         apply_condition_headers(action.headers_mut(), put.conditions)?;
+        // forward MIME type header if set
+        if let Some(ct) = &put.mime_type {
+            action.headers_mut().insert(CONTENT_TYPE.to_string(), ct);
+        }
         let url = action.sign(Self::DURATION);
 
         let body = data;
@@ -305,6 +309,10 @@ impl S3ObjStore {
             .bucket
             .create_multipart_upload(Some(&self.state.creds), &s3_key);
         apply_condition_headers(create.headers_mut(), put.conditions)?;
+        // forward MIME type header if set
+        if let Some(ct) = &put.mime_type {
+            create.headers_mut().insert(CONTENT_TYPE.to_string(), ct);
+        }
         let url = create.sign(Self::DURATION);
         let resp = self.state.client.post(url).send().await?;
         let resp = Self::error_for_status(resp).await?;
