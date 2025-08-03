@@ -82,6 +82,7 @@ async fn list_dir_rec(
     prefix_filter: Option<&str>,
     current_path: &str,
     items: &mut Vec<ObjectMeta>,
+    directories: &mut Option<Vec<String>>,
 ) -> Result<Option<()>, anyhow::Error> {
     let f = async {
         let mut iter = match tokio::fs::read_dir(path).await {
@@ -102,12 +103,25 @@ async fn list_dir_rec(
 
             if !meta.is_file() {
                 if meta.is_dir() {
+                    if let Some(directories) = directories {
+                        directories.push(key.clone());
+                    }
+
                     let cpath = if current_path.is_empty() {
                         key
                     } else {
                         format!("{current_path}/{key}")
                     };
-                    list_dir_rec(&entry.path(), cursor, limit, None, &cpath, items).await?;
+                    list_dir_rec(
+                        &entry.path(),
+                        cursor,
+                        limit,
+                        None,
+                        &cpath,
+                        items,
+                        directories,
+                    )
+                    .await?;
                     continue;
                 } else {
                     continue;
@@ -144,9 +158,20 @@ async fn list_dir(
     limit: usize,
     prefix_filter: Option<&str>,
     current_path: &str,
-) -> Result<Vec<ObjectMeta>, anyhow::Error> {
+    flat: bool,
+) -> Result<(Vec<ObjectMeta>, Option<Vec<String>>), anyhow::Error> {
     let mut items = Vec::new();
-    list_dir_rec(path, cursor, limit, prefix_filter, current_path, &mut items).await?;
+    let mut directories = if flat { None } else { Some(Vec::new()) };
+    list_dir_rec(
+        path,
+        cursor,
+        limit,
+        prefix_filter,
+        current_path,
+        &mut items,
+        &mut directories,
+    )
+    .await?;
 
     let mut keys = HashSet::new();
 
@@ -159,7 +184,7 @@ async fn list_dir(
         }
     });
 
-    Ok(items)
+    Ok((items, directories))
 }
 
 #[async_trait::async_trait]
@@ -328,11 +353,23 @@ impl ObjStore for FsObjStore {
             (self.state.root.clone(), "", None)
         };
 
-        let items = list_dir(&path, args.cursor(), limit, prefix, key_path).await?;
+        let flat = if let Some(delim) = args.delimiter() {
+            if delim == "/" {
+                true
+            } else {
+                bail!("The fs store only supports '/' as a delimiter");
+            }
+        } else {
+            false
+        };
+
+        let (items, directories) =
+            list_dir(&path, args.cursor(), limit, prefix, key_path, flat).await?;
 
         Ok(KeyMetaPage {
             next_cursor: items.last().map(|item| item.key().to_owned()),
             items,
+            prefixes: directories,
         })
     }
 

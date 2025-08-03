@@ -93,6 +93,8 @@ impl ObjectMeta {
 pub struct KeyMetaPage {
     pub items: Vec<ObjectMeta>,
     pub next_cursor: Option<String>,
+
+    pub prefixes: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +108,7 @@ pub struct ListArgs {
     prefix: Option<String>,
     limit: Option<u64>,
     cursor: Option<String>,
+    delimiter: Option<String>,
 }
 
 impl ListArgs {
@@ -117,11 +120,38 @@ impl ListArgs {
         self.prefix.as_deref()
     }
 
+    pub fn set_prefix(&mut self, prefix: impl Into<String>) {
+        let prefix = prefix.into();
+        if !prefix.is_empty() {
+            self.prefix = Some(prefix);
+        } else {
+            self.prefix = None;
+        }
+    }
+
     pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         let prefix = prefix.into();
         if !prefix.is_empty() {
             self.prefix = Some(prefix);
         }
+        self
+    }
+
+    pub fn delimiter(&self) -> Option<&str> {
+        self.delimiter.as_deref()
+    }
+
+    pub fn set_delimiter(&mut self, delimiter: impl Into<String>) {
+        let delimiter = delimiter.into();
+        if !delimiter.is_empty() {
+            self.delimiter = Some(delimiter);
+        } else {
+            self.delimiter = None;
+        }
+    }
+
+    pub fn with_delimiter(mut self, delimiter: impl Into<String>) -> Self {
+        self.set_delimiter(delimiter);
         self
     }
 

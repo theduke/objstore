@@ -405,10 +405,14 @@ impl S3ObjStore {
         } else {
             self.state.path_prefix.clone()
         };
-        if let Some(prefix) = &prefix {
+        if let Some(delimiter) = args.delimiter() {
+            prep.with_delimiter(delimiter);
+        }
+        if let Some(prefix) = &prefix
+            && !prefix.is_empty()
+        {
             prep.with_prefix(prefix);
         }
-        dbg!(&self.state.path_prefix, &prefix, &prep);
         if let Some(cursor) = args.cursor() {
             prep.with_start_after(cursor);
         }
@@ -424,6 +428,7 @@ impl S3ObjStore {
         for content in &mut data.contents {
             // Need to urldecode the key.
             if let Ok(key) = percent_encoding::percent_decode_str(&content.key).decode_utf8() {
+                // TODO: propagate error?
                 content.key = key.into_owned();
             }
 
@@ -682,12 +687,32 @@ impl ObjStore for S3ObjStore {
     }
 
     async fn list(&self, args: ListArgs) -> Result<KeyMetaPage, anyhow::Error> {
+        let delim = args.delimiter().unwrap_or_default().to_string();
         let mut list = self.list_objects(args).await?;
         let cursor = list.next_continuation_token.take();
+
+        let prefixes: Vec<String> = list
+            .common_prefixes
+            .drain(..)
+            .map(|p| {
+                let val = percent_encoding::percent_decode_str(&p.prefix)
+                    .decode_utf8()
+                    .with_context(|| format!("failed to decode prefix: '{}'", p.prefix))?;
+
+                Ok(val.trim_end_matches(&delim).to_owned())
+            })
+            .collect::<Result<Vec<String>, anyhow::Error>>()?;
+        let prefixes = if prefixes.is_empty() {
+            None
+        } else {
+            Some(prefixes)
+        };
+
         let items = self.list_to_metas(list)?;
         Ok(KeyMetaPage {
             items,
             next_cursor: cursor,
+            prefixes,
         })
     }
 

@@ -227,6 +227,8 @@ impl ObjStore for MemoryObjStore {
 
         Ok(KeyMetaPage {
             next_cursor: items.last().map(|item| item.key().to_owned()),
+            // FIXME: implement args.delimiter() based prefix detection
+            prefixes: None,
             items,
         })
     }
