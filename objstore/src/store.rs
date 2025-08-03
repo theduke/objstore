@@ -4,8 +4,8 @@ use anyhow::Context as _;
 use bytes::Bytes;
 
 use crate::{
-    Conditions, Copy, DataSource, KeyMetaPage, KeyPage, KeyStream, ListArgs, MetaStream,
-    ObjectMeta, Put, ValueStream,
+    Conditions, Copy, DataSource, DownloadUrlArgs, KeyMetaPage, KeyPage, KeyStream, ListArgs,
+    MetaStream, ObjectMeta, Put, ValueStream,
 };
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 
@@ -41,6 +41,14 @@ pub trait ObjStore: Send + Sync + std::fmt::Debug {
         &self,
         key: &str,
     ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error>;
+
+    /// Generate a download URL for a given key.
+    ///
+    /// NOTE: Must return `Ok(None)` if the store does not support download URLs!
+    async fn generate_download_url(
+        &self,
+        args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error>;
 
     /// Store a value under a given key.
     async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error>;
@@ -189,6 +197,13 @@ impl<K: ObjStore> ObjStore for Arc<K> {
         self.as_ref().get_stream_with_meta(key).await
     }
 
+    async fn generate_download_url(
+        &self,
+        args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        self.as_ref().generate_download_url(args).await
+    }
+
     async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
         self.as_ref().send_put(put).await
     }
@@ -250,6 +265,13 @@ impl ObjStore for DynObjStore {
         key: &str,
     ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error> {
         self.as_ref().get_stream_with_meta(key).await
+    }
+
+    async fn generate_download_url(
+        &self,
+        args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        self.as_ref().generate_download_url(args).await
     }
 
     async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {

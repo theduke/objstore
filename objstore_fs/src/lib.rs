@@ -15,7 +15,8 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
 
 use objstore::{
-    Copy, DataSource, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put, ValueStream,
+    Copy, DataSource, DownloadUrlArgs, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
+    ValueStream,
 };
 use sha2::Digest;
 use url::Url;
@@ -249,6 +250,13 @@ impl ObjStore for FsObjStore {
 
         let meta = meta_from_fs_meta(key.to_string(), fs_meta);
         Ok(Some((meta, stream)))
+    }
+
+    async fn generate_download_url(
+        &self,
+        _args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        Ok(None)
     }
 
     async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {

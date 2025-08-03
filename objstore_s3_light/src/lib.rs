@@ -22,8 +22,8 @@ use rusty_s3::actions::{CompleteMultipartUpload, CreateMultipartUpload, UploadPa
 use time::{OffsetDateTime, UtcOffset};
 
 use objstore::{
-    Conditions, Copy, DataSource, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
-    ValueStream,
+    Conditions, Copy, DataSource, DownloadUrlArgs, KeyMetaPage, KeyPage, ListArgs, ObjStore,
+    ObjectMeta, Put, ValueStream,
 };
 
 /// A lightweight S3-compatible object store.
@@ -241,6 +241,18 @@ impl S3ObjStore {
             }
             None => Ok(None),
         }
+    }
+
+    fn generate_download_url(&self, args: DownloadUrlArgs) -> Result<Url, anyhow::Error> {
+        let s3_key = self.build_key(&args.key);
+
+        let url = self
+            .state
+            .bucket
+            .get_object(Some(&self.state.creds), &s3_key)
+            .sign(args.valid_for);
+
+        Ok(url)
     }
 
     pub async fn put_object(&self, mut put: Put) -> Result<ObjectMeta, anyhow::Error> {
@@ -626,6 +638,14 @@ impl ObjStore for S3ObjStore {
             }
             None => Ok(None),
         }
+    }
+
+    async fn generate_download_url(
+        &self,
+        args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        let url = Self::generate_download_url(&self, args)?;
+        Ok(Some(url))
     }
 
     async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {

@@ -124,6 +124,13 @@ impl ObjStore for MemoryObjStore {
         }
     }
 
+    async fn generate_download_url(
+        &self,
+        _args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        Ok(None)
+    }
+
     async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
         use sha2::Digest;
 

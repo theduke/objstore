@@ -1,6 +1,8 @@
 use bytes::Bytes;
 
-use crate::{Copy, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put, ValueStream};
+use crate::{
+    Copy, DownloadUrlArgs, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put, ValueStream,
+};
 
 /// Wrapper for an object stores that logs operations with the `tracing` crate.
 ///
@@ -133,6 +135,28 @@ where
             }
             Err(e) => {
                 tracing::error!(store = &self.name, key, error=%e, "get_stream_with_meta::failed");
+                Err(e)
+            }
+        }
+    }
+    async fn generate_download_url(
+        &self,
+        args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        match self.inner.generate_download_url(args).await {
+            Ok(Some(url)) => {
+                tracing::trace!(store = &self.name, %url, "generate_download_url::ok");
+                Ok(Some(url))
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    store = &self.name,
+                    "generate_download_url::failed - store does not support download URLs"
+                );
+                Ok(None)
+            }
+            Err(e) => {
+                tracing::error!(store = &self.name, error=%e, "generate_download_url::failed");
                 Err(e)
             }
         }
