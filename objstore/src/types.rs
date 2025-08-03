@@ -388,3 +388,32 @@ impl Put {
         }
     }
 }
+
+/// Arguments for generating a download URL for an object.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct DownloadUrlArgs {
+    pub key: String,
+
+    pub valid_for: std::time::Duration,
+
+    pub response_content_type: Option<String>,
+    pub response_content_disposition: Option<String>,
+    pub response_content_encoding: Option<String>,
+    pub response_content_language: Option<String>,
+    pub response_cache_control: Option<String>,
+}
+
+impl DownloadUrlArgs {
+    pub fn new(key: impl Into<String>, valid_for: std::time::Duration) -> Self {
+        Self {
+            key: key.into(),
+            valid_for,
+            response_content_type: None,
+            response_content_disposition: None,
+            response_content_encoding: None,
+            response_content_language: None,
+            response_cache_control: None,
+        }
+    }
+}
