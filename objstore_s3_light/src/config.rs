@@ -49,6 +49,64 @@ pub struct S3ObjStoreConfig {
 impl S3ObjStoreConfig {
     pub(crate) const URI_SCHEME: &'static str = "s3";
 
+    const QUERY_STYLE: &'static str = "style";
+    const QUERY_REGION: &'static str = "region";
+    const QUERY_PREFIX: &'static str = "prefix";
+    const QUERY_TOKEN: &'static str = "token";
+
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if !(self.url.scheme() == "http" || self.url.scheme() == "https") {
+            bail!(
+                "Invalid URL scheme: expected http or https, got '{}'",
+                self.url.scheme()
+            );
+        }
+        if self.bucket.trim().is_empty() {
+            bail!("Bucket name must not be empty");
+        }
+        if self.key.trim().is_empty() {
+            bail!("Access key ID must not be empty");
+        }
+        if self.secret.trim().is_empty() {
+            bail!("Secret access key must not be empty");
+        }
+
+        Ok(())
+    }
+
+    pub fn build_uri(&self) -> Result<String, anyhow::Error> {
+        let uri = format!(
+            "{}://{}:{}@{}/{}",
+            Self::URI_SCHEME,
+            self.key,
+            self.secret,
+            self.url.host_str().context("Invalid URL: missing host")?,
+            self.bucket,
+        );
+        let mut url = uri.parse::<Url>()?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair(
+                Self::QUERY_STYLE,
+                match self.path_style {
+                    UrlStyle::Path => "path",
+                    UrlStyle::VirtualHost => "virtual",
+                },
+            );
+            pairs.append_pair(Self::QUERY_REGION, &self.region);
+            if let Some(prefix) = &self.path_prefix {
+                pairs.append_pair(Self::QUERY_PREFIX, prefix);
+            }
+            if let Some(token) = &self.token {
+                pairs.append_pair(Self::QUERY_TOKEN, token);
+            }
+
+            pairs.finish();
+        }
+
+        Ok(url.to_string())
+    }
+
     pub(crate) fn build_bucket(&self) -> Result<Bucket, anyhow::Error> {
         Bucket::new(
             self.url.clone(),
@@ -83,7 +141,7 @@ impl S3ObjStoreConfig {
 
         let region = query_pairs
             .iter()
-            .find(|(k, _)| k == "region")
+            .find(|(k, _)| k == Self::QUERY_REGION)
             .map(|(_, v)| v.to_string());
 
         let key = url.authority();
@@ -110,9 +168,9 @@ impl S3ObjStoreConfig {
         let path_style = {
             let raw = query_pairs
                 .iter()
-                .find(|(k, _)| k == "style")
+                .find(|(k, _)| k == Self::QUERY_STYLE)
                 .map(|(_, v)| v)
-                .context("invalid url: missing ?style=[path|domain|virtual]")?;
+                .context("invalid url: missing ?style=[path|domain]")?;
             match raw.as_ref() {
                 "path" => UrlStyle::Path,
                 "domain" | "virtual" => UrlStyle::VirtualHost,
@@ -135,17 +193,13 @@ impl S3ObjStoreConfig {
             .to_string();
 
         let path_prefix = {
-            let mut prefix = String::new();
-            for seg in path_segs.clone() {
-                if !seg.is_empty() {
-                    if !prefix.is_empty() {
-                        prefix.push('/');
-                    }
-                    prefix.push_str(seg);
-                }
-            }
-            if !prefix.is_empty() {
-                Some(prefix)
+            let raw = query_pairs
+                .iter()
+                .find(|(k, _)| k == Self::QUERY_PREFIX)
+                .map(|(_, v)| v.as_ref())
+                .filter(|s| !s.is_empty());
+            if let Some(prefix) = raw {
+                Some(prefix.to_string())
             } else {
                 None
             }

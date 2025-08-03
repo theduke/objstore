@@ -4,15 +4,30 @@ use crate::store::DynObjStore;
 ///
 /// Can construct an object store from a generic URI.
 /// See [`crate::ObjStoreBuilder`] for usage.
-pub trait ObjStoreProvider {
-    /// Get a descriptive name for backend implementation.
+pub trait ObjStoreProvider: Send + Sync + std::fmt::Debug {
+    type Config: serde::de::DeserializeOwned + serde::Serialize
+    where
+        Self: Sized;
+
+    /// Get a unique identifier for this provider.
     ///
-    /// eg: "memory", "s3", ...
+    /// eg: "objstore.memory", "objstore.s3", ...
+    ///
+    /// Equates to [`crate::ObjStore::kind`].
+    fn kind(&self) -> &'static str;
+
+    /// Get the url scheme for this provider.
+    ///
+    /// Used to identify the provider in URIs.
+    ///
+    /// eg:
+    ///   * uri: `memory://` => scheme: `memory`
+    ///   * uri: `fs://<path>` => scheme: `fs`
     ///
     /// Equates to [`crate::ObjStore::kind`].
     ///
     /// The returned value must also be the protocol used by `Self::parse_uri`.
-    fn kind(&self) -> &str;
+    fn url_scheme(&self) -> &str;
 
     /// Build a new [`ObjStore`] from a generic URI.
     ///

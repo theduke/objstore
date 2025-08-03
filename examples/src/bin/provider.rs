@@ -1,11 +1,13 @@
+use std::sync::Arc;
+
 use objstore::{ObjStoreBuilder, ObjStoreExt};
 
 #[tokio::main]
 async fn main() {
     let builder = ObjStoreBuilder::new()
-        .with_provider(Box::new(objstore_memory::MemoryProvider))
-        .with_provider(Box::new(objstore_fs::FsProvider))
-        .with_provider(Box::new(objstore_s3_light::S3LightProvider));
+        .with_provider(Arc::new(objstore_memory::MemoryProvider::new()))
+        .with_provider(Arc::new(objstore_fs::FsProvider::new()))
+        .with_provider(Arc::new(objstore_s3_light::S3LightProvider::new()));
 
     // let uri = "memory://";
     // let uri = "fs:///tmp/my_store";

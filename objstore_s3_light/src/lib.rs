@@ -100,7 +100,7 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
 
 impl S3ObjStore {
     /// The kind of this object store (see [`ObjStore::kind`]).
-    pub const KIND: &'static str = "s3-light";
+    pub const KIND: &'static str = "objstore.s3-light";
 
     const DURATION: Duration = Duration::from_secs(180);
     /// Chunk size for multipart upload (minimum 5 MiB per part).

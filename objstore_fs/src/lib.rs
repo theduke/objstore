@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use bytes::Bytes;
 use futures::{StreamExt as _, TryStreamExt as _};
 use time::OffsetDateTime;
@@ -45,7 +45,7 @@ struct State {
 
 impl FsObjStore {
     /// The kind of this object store (see [`ObjStore::kind`]).
-    pub const KIND: &'static str = "fs";
+    pub const KIND: &'static str = "objstore.fs";
 
     pub fn new(config: FsObjStoreConfig) -> Result<Self, anyhow::Error> {
         let root = config.path.clone();

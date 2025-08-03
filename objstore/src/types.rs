@@ -159,8 +159,16 @@ impl ListArgs {
         self.limit
     }
 
+    pub fn set_limit(&mut self, limit: u64) {
+        if limit > 0 {
+            self.limit = Some(limit);
+        } else {
+            self.limit = None;
+        }
+    }
+
     pub fn with_limit(mut self, limit: u64) -> Self {
-        self.limit = Some(limit);
+        self.set_limit(limit);
         self
     }
 

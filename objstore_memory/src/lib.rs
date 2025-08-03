@@ -10,7 +10,8 @@ use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 use objstore::{
-    Copy, DataSource, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put, ValueStream,
+    Copy, DataSource, DownloadUrlArgs, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
+    ValueStream,
 };
 use url::Url;
 
@@ -42,7 +43,7 @@ struct State {
 
 impl MemoryObjStore {
     /// The kind of this object store (see [`ObjStore::kind`]).
-    pub const KIND: &'static str = "memory";
+    pub const KIND: &'static str = "objstore.memory";
 
     pub fn new() -> Self {
         Self {

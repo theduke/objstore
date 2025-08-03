@@ -2,10 +2,27 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
-pub struct S3LightProvider;
+use crate::S3ObjStore;
+
+#[derive(Clone, Debug, Default)]
+pub struct S3LightProvider {
+    _private: (),
+}
+
+impl S3LightProvider {
+    pub const fn new() -> Self {
+        Self { _private: () }
+    }
+}
 
 impl objstore::ObjStoreProvider for S3LightProvider {
-    fn kind(&self) -> &str {
+    type Config = crate::S3ObjStoreConfig;
+
+    fn kind(&self) -> &'static str {
+        S3ObjStore::KIND
+    }
+
+    fn url_scheme(&self) -> &str {
         "s3"
     }
 

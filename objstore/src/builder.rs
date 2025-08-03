@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use crate::{ObjStoreProvider, store::DynObjStore};
 
+#[derive(Clone, Debug)]
 pub struct ObjStoreBuilder {
-    providers: Vec<Box<dyn ObjStoreProvider>>,
+    providers: Vec<Arc<dyn ObjStoreProvider>>,
 }
 
 impl Default for ObjStoreBuilder {
@@ -18,10 +21,10 @@ impl ObjStoreBuilder {
     }
 
     pub fn register_provider<P: ObjStoreProvider + 'static>(&mut self, provider: P) {
-        self.providers.push(Box::new(provider));
+        self.providers.push(Arc::new(provider));
     }
 
-    pub fn with_provider(mut self, provider: Box<dyn ObjStoreProvider>) -> Self {
+    pub fn with_provider(mut self, provider: Arc<dyn ObjStoreProvider>) -> Self {
         self.providers.push(provider);
         self
     }
@@ -30,7 +33,7 @@ impl ObjStoreBuilder {
         let url = url::Url::parse(uri).map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
 
         for provider in &self.providers {
-            if provider.kind() == url.scheme() {
+            if provider.url_scheme() == url.scheme() {
                 return provider.build(&url);
             }
         }

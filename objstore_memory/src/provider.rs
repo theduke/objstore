@@ -2,18 +2,35 @@ use std::sync::Arc;
 
 use objstore::ObjStoreProvider;
 
-pub struct MemoryProvider;
+use crate::MemoryObjStore;
+
+#[derive(Clone, Debug, Default)]
+pub struct MemoryProvider {
+    _private: (),
+}
+
+impl MemoryProvider {
+    pub const fn new() -> Self {
+        Self { _private: () }
+    }
+}
 
 impl ObjStoreProvider for MemoryProvider {
-    fn kind(&self) -> &str {
+    type Config = ();
+
+    fn kind(&self) -> &'static str {
+        MemoryObjStore::KIND
+    }
+
+    fn url_scheme(&self) -> &str {
         "memory"
     }
 
     fn build(&self, url: &url::Url) -> Result<objstore::DynObjStore, anyhow::Error> {
-        if url.scheme() != self.kind() {
+        if url.scheme() != self.url_scheme() {
             return Err(anyhow::anyhow!(
                 "Invalid scheme: expected '{}', got '{}'",
-                self.kind(),
+                self.url_scheme(),
                 url.scheme()
             ));
         }
