@@ -25,6 +25,7 @@ pub struct ObjectMeta {
     pub size: Option<u64>,
     pub created_at: Option<OffsetDateTime>,
     pub updated_at: Option<OffsetDateTime>,
+    pub hash_md5: Option<[u8; 16]>,
     pub hash_sha256: Option<[u8; 32]>,
     /// Optional MIME content type of the object.
     pub mime_type: Option<String>,
@@ -40,6 +41,7 @@ impl ObjectMeta {
             size: None,
             created_at: None,
             updated_at: None,
+            hash_md5: None,
             hash_sha256: None,
             mime_type: None,
             extra: HashMap::new(),

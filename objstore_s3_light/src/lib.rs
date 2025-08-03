@@ -9,6 +9,8 @@ pub use self::{
 use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use anyhow::Context;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use futures::TryStreamExt as _;
 use http::{HeaderMap, StatusCode};
@@ -101,7 +103,34 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
             .to_string();
         meta.mime_type = Some(ct);
     }
-    // FIXME: hashes, other attributes
+    // Extract MD5 hash from Content-MD5 header (base64-encoded)
+    if let Some(v) = headers.get("Content-MD5") {
+        let raw = v.to_str().context("invalid content-md5 header")?;
+        let bytes = STANDARD
+            .decode(raw)
+            .context("invalid base64 content-md5 header")?;
+        if bytes.len() == 16 {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&bytes);
+            meta.hash_md5 = Some(arr);
+        } else {
+            tracing::warn!(len = bytes.len(), "unexpected Content-MD5 length");
+        }
+    }
+    // Extract SHA256 hash from x-amz-meta-sha256 header (hex-encoded)
+    if let Some(v) = headers.get("x-amz-meta-sha256") {
+        let raw = v.to_str().context("invalid x-amz-meta-sha256 header")?;
+        if raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
+            let mut arr = [0u8; 32];
+            for i in 0..32 {
+                arr[i] = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
+                    .context("invalid hex in x-amz-meta-sha256 header")?;
+            }
+            meta.hash_sha256 = Some(arr);
+        } else {
+            tracing::warn!(header = raw, "unexpected x-amz-meta-sha256 format");
+        }
+    }
 
     Ok(meta)
 }
@@ -472,7 +501,18 @@ impl S3ObjStore {
                 meta.created_at = None;
                 meta.updated_at = Some(updated_at);
 
-                // FIXME: hashes, extra, etc.
+                // Extract MD5 hash from ETag when it's a simple hex string
+                if let Some(etag_val) = &meta.etag {
+                    let tag = etag_val.trim_matches('"');
+                    if tag.len() == 32 && tag.chars().all(|c| c.is_ascii_hexdigit()) {
+                        let mut arr = [0u8; 16];
+                        for i in 0..16 {
+                            arr[i] =
+                                u8::from_str_radix(&tag[i * 2..i * 2 + 2], 16).unwrap_or_default();
+                        }
+                        meta.hash_md5 = Some(arr);
+                    }
+                }
 
                 Ok(meta)
             })
@@ -755,6 +795,9 @@ mod tests {
     use crate::S3ObjStoreConfig;
 
     use super::*;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use sha2::{Digest, Sha256};
 
     fn test_strict() -> bool {
         std::env::var("TEST_STRICT").is_ok()
@@ -795,6 +838,22 @@ mod tests {
                 .unwrap(),
             "Tue, 15 Nov 1994 12:45:26 +0000",
         );
+
+        // Test MD5 and SHA256 hash extraction
+        // MD5 of empty body is d41d8cd98f00b204e9800998ecf8427e (base64: 1B2M2Y8AsgTpgAmY7PhCfg==)
+        map.insert("Content-MD5", "1B2M2Y8AsgTpgAmY7PhCfg==".parse().unwrap());
+        // SHA256 of empty body
+        let sha_raw = format!("{:x}", Sha256::digest(b""));
+        map.insert("x-amz-meta-sha256", sha_raw.parse().unwrap());
+        let meta = parse_object_headers("key".to_string(), &map).unwrap();
+        // verify MD5 bytes
+        let md5_bytes = STANDARD.decode("1B2M2Y8AsgTpgAmY7PhCfg==").unwrap();
+        let mut md5_arr = [0u8; 16];
+        md5_arr.copy_from_slice(&md5_bytes);
+        assert_eq!(meta.hash_md5, Some(md5_arr));
+        // verify SHA256 bytes
+        let sha_expected = Sha256::digest(b"");
+        assert_eq!(meta.hash_sha256, Some(sha_expected.into()));
     }
 
     #[tokio::test]
