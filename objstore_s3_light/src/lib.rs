@@ -459,7 +459,11 @@ impl S3ObjStore {
             prep.with_prefix(prefix);
         }
         if let Some(cursor) = args.cursor() {
-            prep.with_start_after(cursor);
+            prep.with_continuation_token(cursor);
+        }
+        if let Some(limit) = args.limit() {
+            let limit: usize = limit.try_into().context("limit is too large")?;
+            prep.with_max_keys(limit);
         }
 
         let url = prep.sign(Self::DURATION);
