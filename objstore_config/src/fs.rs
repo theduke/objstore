@@ -146,6 +146,7 @@ impl FsConfigStore {
         source: Option<ConfigSource>,
     ) -> Result<LoadedConnection, anyhow::Error> {
         // FIXME: handle is_new and source properly
+        let _ = (is_new, source);
 
         let connections_dir = self.connections_dir();
         std::fs::create_dir_all(&connections_dir).with_context(|| {
