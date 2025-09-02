@@ -4,8 +4,8 @@ use anyhow::Context as _;
 use bytes::Bytes;
 
 use crate::{
-    Conditions, Copy, DataSource, DownloadUrlArgs, ObjectMetaPage, KeyPage, KeyStream, ListArgs,
-    MetaStream, ObjectMeta, Put, ValueStream,
+    Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, KeyStream, ListArgs, MetaStream,
+    ObjectMeta, ObjectMetaPage, Put, ValueStream,
 };
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 

@@ -1,7 +1,8 @@
 use bytes::Bytes;
 
 use crate::{
-    Copy, DownloadUrlArgs, ObjectMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put, ValueStream,
+    Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage, Put,
+    ValueStream,
 };
 
 /// Wrapper for an object stores that logs operations with the `tracing` crate.

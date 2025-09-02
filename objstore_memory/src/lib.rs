@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, ObjectMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
-    ValueStream,
+    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
+    Put, ValueStream,
 };
 use url::Url;
 

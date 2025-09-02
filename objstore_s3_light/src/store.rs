@@ -14,8 +14,8 @@ use rusty_s3::actions::{CompleteMultipartUpload, CreateMultipartUpload, UploadPa
 use time::OffsetDateTime;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, ObjectMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
-    ValueStream,
+    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
+    Put, ValueStream,
 };
 
 use crate::{
