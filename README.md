@@ -22,6 +22,8 @@ Each backend is available as a separate crate.
 - [ ] `objstore_s3`
   Full-featured S3 backend based on the official AWS SDK.
   Supports more functionality efficiently, but has more dependencies.
+- [ ] `objstore_gcs`
+  Google Cloud Storage backend based on the official GCP SDK.
 
   NOTE: not implemented yet, but planned.
   
