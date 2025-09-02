@@ -9,6 +9,7 @@ readme.workspace = true
 edition.workspace = true
 
 [features]
+default = ["rustls"]
 rustls = ["reqwest/rustls-tls"]
 
 [dependencies]
