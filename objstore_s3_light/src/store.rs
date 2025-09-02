@@ -14,7 +14,7 @@ use rusty_s3::actions::{CompleteMultipartUpload, CreateMultipartUpload, UploadPa
 use time::OffsetDateTime;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
+    Copy, DataSource, DownloadUrlArgs, ObjectMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
     ValueStream,
 };
 
@@ -578,7 +578,7 @@ impl ObjStore for S3ObjStore {
         self.delete_object(key).await
     }
 
-    async fn list(&self, args: ListArgs) -> Result<KeyMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
         let delim = args.delimiter().unwrap_or_default().to_string();
         let mut list = self.list_objects(args).await?;
         let cursor = list.next_continuation_token.take();
@@ -601,7 +601,7 @@ impl ObjStore for S3ObjStore {
         };
 
         let items = self.list_to_metas(list)?;
-        Ok(KeyMetaPage {
+        Ok(ObjectMetaPage {
             items,
             next_cursor: cursor,
             prefixes,

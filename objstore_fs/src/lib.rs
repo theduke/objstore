@@ -15,7 +15,7 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
+    Copy, DataSource, DownloadUrlArgs, ObjectMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
     ValueStream,
 };
 use sha2::Digest;
@@ -339,7 +339,7 @@ impl ObjStore for FsObjStore {
         Ok(())
     }
 
-    async fn list(&self, args: ListArgs) -> Result<KeyMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
         let limit = args.limit().unwrap_or(10_000) as usize;
 
         // Must compute the prefix as a parent directory.
@@ -366,7 +366,7 @@ impl ObjStore for FsObjStore {
         let (items, directories) =
             list_dir(&path, args.cursor(), limit, prefix, key_path, flat).await?;
 
-        Ok(KeyMetaPage {
+        Ok(ObjectMetaPage {
             next_cursor: items.last().map(|item| item.key().to_owned()),
             items,
             prefixes: directories,

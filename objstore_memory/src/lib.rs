@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
+    Copy, DataSource, DownloadUrlArgs, ObjectMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put,
     ValueStream,
 };
 use url::Url;
@@ -201,7 +201,7 @@ impl ObjStore for MemoryObjStore {
         Ok(())
     }
 
-    async fn list(&self, args: ListArgs) -> Result<KeyMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
         let data = self.state.data.read().await;
 
         let limit = args.limit().unwrap_or(1_000) as usize;
@@ -226,7 +226,7 @@ impl ObjStore for MemoryObjStore {
             }
         };
 
-        Ok(KeyMetaPage {
+        Ok(ObjectMetaPage {
             next_cursor: items.last().map(|item| item.key().to_owned()),
             // FIXME: implement args.delimiter() based prefix detection
             prefixes: None,

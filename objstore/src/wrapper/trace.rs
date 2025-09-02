@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use crate::{
-    Copy, DownloadUrlArgs, KeyMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put, ValueStream,
+    Copy, DownloadUrlArgs, ObjectMetaPage, KeyPage, ListArgs, ObjStore, ObjectMeta, Put, ValueStream,
 };
 
 /// Wrapper for an object stores that logs operations with the `tracing` crate.
@@ -224,7 +224,7 @@ where
         }
     }
 
-    async fn list(&self, args: ListArgs) -> Result<KeyMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
         match self.inner.list(args).await {
             Ok(page) => {
                 tracing::trace!(store = &self.name, ?page, "list::ok");

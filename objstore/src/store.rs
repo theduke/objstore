@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use bytes::Bytes;
 
 use crate::{
-    Conditions, Copy, DataSource, DownloadUrlArgs, KeyMetaPage, KeyPage, KeyStream, ListArgs,
+    Conditions, Copy, DataSource, DownloadUrlArgs, ObjectMetaPage, KeyPage, KeyStream, ListArgs,
     MetaStream, ObjectMeta, Put, ValueStream,
 };
 use futures::{StreamExt as _, TryStreamExt as _, stream};
@@ -104,9 +104,9 @@ pub trait ObjStore: Send + Sync + std::fmt::Debug {
     ///
     /// The arguments allow for prefix filtering, pagination, and limiting
     /// the number of results.
-    async fn list(&self, args: ListArgs) -> Result<KeyMetaPage, anyhow::Error>;
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error>;
 
-    /// Streaming variant of [`list`]: pages through [`Self::list`] and yields each metadata page (`KeyMetaPage`).
+    /// Streaming variant of [`list`]: pages through [`Self::list`] and yields each metadata page (`ObjectMetaPage`).
     ///
     /// This default method repeatedly calls `list` to page through all results lazily.
     fn list_stream(&self, args: ListArgs) -> MetaStream
@@ -219,7 +219,7 @@ impl<K: ObjStore> ObjStore for Arc<K> {
         self.as_ref().delete_prefix(prefix).await
     }
 
-    async fn list(&self, args: ListArgs) -> Result<KeyMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
         self.as_ref().list(args).await
     }
 
@@ -285,7 +285,7 @@ impl ObjStore for DynObjStore {
         self.as_ref().delete(key).await
     }
 
-    async fn list(&self, args: ListArgs) -> Result<KeyMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
         self.as_ref().list(args).await
     }
 
