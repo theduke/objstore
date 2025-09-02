@@ -198,11 +198,7 @@ impl S3ObjStoreConfig {
                 .find(|(k, _)| k == Self::QUERY_PREFIX)
                 .map(|(_, v)| v.as_ref())
                 .filter(|s| !s.is_empty());
-            if let Some(prefix) = raw {
-                Some(prefix.to_string())
-            } else {
-                None
-            }
+            raw.map(|prefix| prefix.to_string())
         };
 
         let region = region.unwrap_or_else(|| "auto".to_string());

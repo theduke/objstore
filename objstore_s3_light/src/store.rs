@@ -541,7 +541,7 @@ impl ObjStore for S3ObjStore {
         &self,
         args: DownloadUrlArgs,
     ) -> Result<Option<url::Url>, anyhow::Error> {
-        let url = Self::generate_download_url(&self, args)?;
+        let url = Self::generate_download_url(self, args)?;
         Ok(Some(url))
     }
 

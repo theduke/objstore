@@ -101,7 +101,7 @@ impl FsConfigStore {
                     Ok(config) => LoadedConnections::new_one_loaded(path.to_owned(), config),
                     Err(err) => LoadedConnections::new_one_failed(
                         path.to_owned(),
-                        format!("Failed to parse connection config: {}", err),
+                        format!("Failed to parse connection config: {err}"),
                         Some(0),
                     ),
                 }
@@ -120,7 +120,7 @@ impl FsConfigStore {
                         Err(err) => {
                             cons.failed.push(ConnectionLoadError {
                                 source: path.to_owned().into(),
-                                error: format!("Failed to parse connection config: {}", err),
+                                error: format!("Failed to parse connection config: {err}"),
                                 index: Some(index),
                             });
                         }
