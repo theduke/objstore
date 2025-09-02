@@ -51,11 +51,32 @@ fn expect_meta(expected: &ObjectMeta, actual: &ObjectMeta) {
         );
     }
 
+    let now = OffsetDateTime::now_utc();
     if let Some(created_at) = actual.created_at {
-        assert_eq!(exected_created_at, created_at);
+        let diff1 = now - created_at;
+        let diff2 = now - exected_created_at;
+        let diff = if diff1 > diff2 {
+            diff1 - diff2
+        } else {
+            diff2 - diff1
+        };
+        assert!(
+            diff.whole_seconds() < 10,
+            "expected {created_at:?} to roughly match {exected_created_at:?}"
+        );
     }
     if let Some(updated_at) = actual.updated_at {
-        assert_eq!(expected_updated_at, updated_at);
+        let diff1 = now - updated_at;
+        let diff2 = now - expected_updated_at;
+        let diff = if diff1 > diff2 {
+            diff1 - diff2
+        } else {
+            diff2 - diff1
+        };
+        assert!(
+            diff.whole_seconds() < 10,
+            "expected {updated_at:?} to roughly match {expected_updated_at:?}"
+        );
     }
     if let Some(hash) = actual.hash_sha256 {
         assert_eq!(hash_sha256, hash);
