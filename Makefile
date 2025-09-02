@@ -2,13 +2,17 @@
 fmt:
 	cargo fmt
 
+lint: lint-format check lint-clippy lint-cargo-deny
+
 lint-format:
 	cargo fmt --check
 
 lint-clippy:
 	cargo clippy --all-features -- -D warnings
 
-lint: lint-format check lint-clippy
+
+lint-cargo-deny:
+	cargo deny check
 
 fix:
 	cargo clippy --fix --allow-dirty --all-features
