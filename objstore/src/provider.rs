@@ -29,7 +29,7 @@ pub trait ObjStoreProvider: Send + Sync + std::fmt::Debug {
     /// The returned value must also be the protocol used by `Self::parse_uri`.
     fn url_scheme(&self) -> &str;
 
-    /// Build a new [`ObjStore`] from a generic URI.
+    /// Build a new [`crate::ObjStore`] from a generic URI.
     ///
     /// Used by the [`crate::ObjStoreBuilder`] to allow for dynamic construction.
     ///

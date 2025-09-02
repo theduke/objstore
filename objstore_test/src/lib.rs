@@ -210,7 +210,7 @@ where
     }
 }
 
-/// Test a [`KvStore`] implementation.
+/// Test an ObjStore implementation.
 ///
 /// NOTE: the store must be empty before running this test!
 /// A simple way to ensure that is to use a nested path store.
