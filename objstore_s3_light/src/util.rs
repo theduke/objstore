@@ -4,7 +4,7 @@ use http::HeaderMap;
 use objstore::{Conditions, ObjectMeta};
 use time::OffsetDateTime;
 
-/// See https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html
+/// See <https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html>
 pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMeta, anyhow::Error> {
     let last_modified = if let Some(v) = headers.get(http::header::LAST_MODIFIED) {
         let raw = v.to_str().with_context(|| {

@@ -12,11 +12,7 @@ pub type KeyStream<'a> = futures::stream::BoxStream<'a, Result<KeyPage, anyhow::
 /// Stream of metadata pages (as returned by `list`).
 pub type MetaStream = futures::stream::BoxStream<'static, Result<ObjectMetaPage, anyhow::Error>>;
 
-/// Key metadata.
-///
-/// Fields are private for forwards compatibility.
-///
-/// Use [`ObjectMeta::into_parts`] to get a struct with public fields.
+/// Object metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ObjectMeta {

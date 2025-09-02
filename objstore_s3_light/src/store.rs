@@ -24,8 +24,6 @@ use crate::{
 };
 
 /// A lightweight S3-compatible object store.
-///
-/// Implements the [`KVStore`] trait.
 #[derive(Clone, Debug)]
 pub struct S3ObjStore {
     state: Arc<State>,

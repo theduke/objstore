@@ -106,7 +106,7 @@ pub trait ObjStore: Send + Sync + std::fmt::Debug {
     /// the number of results.
     async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error>;
 
-    /// Streaming variant of [`list`]: pages through [`Self::list`] and yields each metadata page (`ObjectMetaPage`).
+    /// Streaming variant of [`Self::list`]: pages through [`Self::list`] and yields each metadata page (`ObjectMetaPage`).
     ///
     /// This default method repeatedly calls `list` to page through all results lazily.
     fn list_stream(&self, args: ListArgs) -> MetaStream
