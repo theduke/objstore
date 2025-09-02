@@ -2,7 +2,7 @@
 fmt:
 	cargo fmt
 
-lint: lint-format check lint-clippy lint-cargo-deny
+lint: lint-format check lint-clippy lint-docs lint-cargo-deny
 
 lint-format:
 	cargo fmt --check
@@ -10,6 +10,8 @@ lint-format:
 lint-clippy:
 	cargo clippy --all-features -- -D warnings
 
+lint-docs:
+	cargo doc --workspace --all-features --no-deps --document-private-items --keep-going
 
 lint-cargo-deny:
 	cargo deny check
