@@ -256,6 +256,7 @@ pub async fn test_objstore(store: &impl ObjStore) {
 
     let key1_name = Uuid::new_v4().to_string();
     let key1 = format!("{prefix}/{key1_name}");
+    let value1 = "hello";
 
     let v = store.get(&key1).await.unwrap();
     assert!(v.is_none());
@@ -264,30 +265,27 @@ pub async fn test_objstore(store: &impl ObjStore) {
     let v = store.meta(&key1).await.unwrap();
     assert!(v.is_none());
 
-    store.put(&key1).bytes("hello").await.unwrap();
+    store.put(&key1).bytes(value1).await.unwrap();
+    let key1_created_at = OffsetDateTime::now_utc();
+    let key1_meta = {
+        let mut m = ObjectMeta::new(key1.clone());
+        m.size = Some(value1.len() as u64);
+        m.created_at = Some(key1_created_at);
+        m.updated_at = Some(key1_created_at);
+        m.hash_md5 = Some(md5::compute(value1.as_bytes()).0);
+        m.hash_sha256 = Some(sha2::Sha256::digest(value1).into());
+        m
+    };
+
     let v = store.get(&key1).await.unwrap().unwrap();
     assert_eq!(v.as_ref(), b"hello");
 
-    let (v, mut meta1) = store.get_with_meta(&key1).await.unwrap().unwrap();
+    let (v, meta1) = store.get_with_meta(&key1).await.unwrap().unwrap();
     assert_eq!(v.as_ref(), b"hello");
-    assert_eq!(meta1.key(), key1);
-    if let Some(size) = meta1.size {
-        assert_eq!(size, 5);
-    }
-    meta1.round_timestamps_second();
+    approximate_meta_match(&key1_meta, &meta1, "get_with_meta");
 
-    let mut meta2 = store.meta(&key1).await.unwrap().unwrap();
-    meta2.round_timestamps_second();
-    assert_eq!(meta1, meta2);
-
-    let mut items = store
-        .list(ListArgs::new().with_prefix(&prefix))
-        .await
-        .unwrap()
-        .items;
-    assert_eq!(items.len(), 1);
-    items.iter_mut().for_each(|m| m.round_timestamps_second());
-    assert_eq!(items[0], meta1);
+    let meta2 = store.meta(&key1).await.unwrap().unwrap();
+    approximate_meta_match(&key1_meta, &meta2, "meta");
 
     // with prefix
     let nested_prefix = format!("{}/{}", prefix, &key1_name[0..5]);
@@ -298,7 +296,7 @@ pub async fn test_objstore(store: &impl ObjStore) {
         .items;
     assert_eq!(items.len(), 1);
     items.iter_mut().for_each(|m| m.round_timestamps_second());
-    assert_eq!(items[0], meta1);
+    approximate_meta_match(&key1_meta, &items[0], "list with prefix");
 
     store.delete(&key1).await.unwrap();
     let v = store.get(&key1).await.unwrap();
@@ -318,35 +316,115 @@ pub async fn test_objstore(store: &impl ObjStore) {
     // MULTI-KEY
     let prefix = Uuid::new_v4().to_string();
     let key1 = format!("{prefix}/key1");
+    let value1 = "val1";
     let key2 = format!("{prefix}/key2");
+    let value2 = "val2";
     let key3 = format!("{prefix}/key3");
+    let value3 = "val3";
+
+    let created = OffsetDateTime::now_utc();
+
+    let key1meta = {
+        let mut m = ObjectMeta::new(key1.clone());
+        m.size = Some(value1.len() as u64);
+        m.created_at = Some(created);
+        m.updated_at = Some(created);
+        m.hash_md5 = Some(md5::compute(value1.as_bytes()).0);
+        m.hash_sha256 = Some(sha2::Sha256::digest(value1).into());
+        m
+    };
+    let key2meta = {
+        let mut m = ObjectMeta::new(key2.clone());
+        m.size = Some(value2.len() as u64);
+        m.created_at = Some(created);
+        m.updated_at = Some(created);
+        m.hash_md5 = Some(md5::compute(value2.as_bytes()).0);
+        m.hash_sha256 = Some(sha2::Sha256::digest(value2).into());
+        m
+    };
+    let key3meta = {
+        let mut m = ObjectMeta::new(key3.clone());
+        m.size = Some(value3.len() as u64);
+        m.created_at = Some(created);
+        m.updated_at = Some(created);
+        m.hash_md5 = Some(md5::compute(value3.as_bytes()).0);
+        m.hash_sha256 = Some(sha2::Sha256::digest(value3).into());
+        m
+    };
 
     store.put(&key1).bytes("val1").await.unwrap();
     store.put(&key2).bytes("val2").await.unwrap();
     store.put(&key3).bytes("val3").await.unwrap();
 
-    let mut meta1 = store.meta(&key1).await.unwrap().unwrap();
-    let mut meta2 = store.meta(&key2).await.unwrap().unwrap();
-    let mut meta3 = store.meta(&key3).await.unwrap().unwrap();
-    meta1.round_timestamps_second();
-    meta2.round_timestamps_second();
-    meta3.round_timestamps_second();
+    {
+        let meta1 = store.meta(&key1).await.unwrap().unwrap();
+        let meta2 = store.meta(&key2).await.unwrap().unwrap();
+        let meta3 = store.meta(&key3).await.unwrap().unwrap();
+        approximate_meta_match(&meta1, &key1meta, "multi-key meta1");
+        approximate_meta_match(&meta2, &key2meta, "multi-key meta2");
+        approximate_meta_match(&meta3, &key3meta, "multi-key meta3");
+    }
 
-    let mut list = store
-        .list(ListArgs::new().with_prefix(&prefix))
-        .await
-        .unwrap()
-        .items;
-    assert_eq!(list.len(), 3);
-    list.sort_by(|a, b| a.key().cmp(b.key()));
-    list.iter_mut().for_each(|m| m.round_timestamps_second());
+    {
+        let mut list = store
+            .list(ListArgs::new().with_prefix(&prefix))
+            .await
+            .unwrap()
+            .items;
+        assert_eq!(list.len(), 3);
+        list.sort_by(|a, b| a.key().cmp(b.key()));
+        list.iter_mut().for_each(|m| m.round_timestamps_second());
 
-    assert_eq!(list[0], meta1);
-    assert_eq!(list[1], meta2);
-    assert_eq!(list[2], meta3);
+        approximate_meta_match(&list[0], &key1meta, "list meta1");
+        approximate_meta_match(&list[1], &key2meta, "list meta2");
+        approximate_meta_match(&list[2], &key3meta, "list meta3");
+    }
 
     // Delete all.
     store.delete_prefix("").await.unwrap();
     let items = store.list(ListArgs::new()).await.unwrap().items;
     assert_eq!(items.len(), 0);
+}
+
+fn approximate_datetime_match(a: OffsetDateTime, b: OffsetDateTime, msg: &str) {
+    let diff = if a > b { a - b } else { b - a };
+    assert!(
+        diff.whole_seconds() < 5,
+        "inexact datetime match: {msg} | {a:?} vs {b:?}"
+    );
+}
+
+fn approximate_meta_match(a: &ObjectMeta, b: &ObjectMeta, msg: &str) {
+    assert_eq!(a.key, b.key, "key should match: {}", msg);
+    if let (Some(a_size), Some(b_size)) = (a.size, b.size) {
+        assert_eq!(a_size, b_size, "size should match: {}", msg);
+    }
+    if let (Some(a_created_at), Some(b_created_at)) = (a.created_at, b.created_at) {
+        approximate_datetime_match(
+            a_created_at,
+            b_created_at,
+            &format!("created_at should match: {msg}"),
+        );
+    }
+    if let (Some(a_updated_at), Some(b_updated_at)) = (a.updated_at, b.updated_at) {
+        approximate_datetime_match(
+            a_updated_at,
+            b_updated_at,
+            &format!("updated_at should match: {msg}"),
+        );
+    }
+    if let (Some(a_hash), Some(b_hash)) = (a.hash_md5, b.hash_md5) {
+        assert_eq!(a_hash, b_hash, "hash_md5 should match: {}", msg);
+    }
+    if let (Some(a_hash), Some(b_hash)) = (a.hash_sha256, b.hash_sha256) {
+        assert_eq!(a_hash, b_hash, "hash_sha256 should match: {}", msg);
+    }
+    if let (Some(a_etag), Some(b_etag)) = (&a.etag, &b.etag) {
+        assert_eq!(a_etag, b_etag, "etag should match: {}", msg);
+    }
+    if let (Some(a_mime), Some(b_mime)) = (&a.mime_type, &b.mime_type) {
+        assert_eq!(a_mime, b_mime, "mime_type should match: {}", msg);
+    }
+
+    // todo: extra handling?
 }

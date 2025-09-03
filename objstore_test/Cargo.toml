@@ -20,3 +20,4 @@ sha2.workspace = true
 time.workspace = true
 
 pretty_assertions = "1.4.1"
+md5 = "0.8.0"

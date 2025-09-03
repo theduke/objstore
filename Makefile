@@ -39,7 +39,38 @@ coverage:
 # Prepare for a PR by running all lints, checks and tests.
 ready: fix lint test
 
-start-minio:
-	docker run -d --name minio -p 9000:9000 -e "MINIO_ROOT_USER=admin" -e "MINIO_ROOT_PASSWORD=admin"
 
-.PHONY: fmt lint-format lint-clippy lint check test coverage ready
+MINIO_USER ?= minioadmin
+MINIO_PASSWORD ?= minioadmin
+
+# Start a local MinIO server through Docker for testing object storage functionality.
+start-minio-docker:
+	@if [ -z "$(shell docker ps -q -f name=objstore-minio)" ]; then \
+		docker run -d --rm \
+			--name objstore-minio \
+			-p 9000:9000 \
+			-p 9001:9001 \
+			-e "MINIO_ROOT_USER=$(MINIO_USER)" \
+			-e "MINIO_ROOT_PASSWORD=$(MINIO_PASSWORD)" \
+			minio/minio server /data --console-address ":9001"; \
+	else \
+		docker start objstore-minio; \
+	fi
+	
+	# Wait for minio to start
+	@echo "Waiting for MinIO server to be ready..."
+	while ! curl --fail -s http://localhost:9000/minio/health/live; do sleep 1; done
+	@echo "MinIO server is ready."
+
+test-minio-s3-light: start-minio-docker
+	@echo "Running S3 Light tests against local MinIO server"
+	@{ \
+		BUCKET_NAME=test-bucket-$$(date +%s); \
+		export TEST_STRICT=1; \
+		export TEST_CREATE_BUCKET=1; \
+		export S3_TEST_URI="s3://$(MINIO_USER):$(MINIO_PASSWORD)@127.0.0.1:9000/$$BUCKET_NAME?style=path&insecure"; \
+		echo "URI: $$S3_TEST_URI"; \
+		cargo test -p objstore_s3_light --all-features; \
+	}
+
+.PHONY: fmt lint-format lint-clippy lint check test coverage ready start-minio-docker test-minio-s3-light
