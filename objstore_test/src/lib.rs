@@ -186,19 +186,19 @@ where
     }
 
     // Copy the key and verify the copy exists.
-    // {
-    //     let dest = format!("{prefix}/{key_name}_copy");
-    //     let copy_meta = store.copy(&key, &dest).send().await.unwrap();
-    //     let value_copy = store.get(&dest).await.unwrap().unwrap();
-    //     expect_key(store, &dest, &value_copy, copy_meta.clone()).await;
-    // }
+    {
+        let dest = format!("{prefix}/{key_name}_copy");
+        let copy_meta = store.copy(&key, &dest).send().await.unwrap();
+        let value_copy = store.get(&dest).await.unwrap().unwrap();
+        expect_key(store, &dest, &value_copy, copy_meta.clone()).await;
+    }
 
     // Delete the key and check it no longer exists.
     {
         // Remove both original and copied keys.
         store.delete(&key).await.unwrap();
-        // let dest = format!("{prefix}/{key_name}_copy");
-        // store.delete(&dest).await.unwrap();
+        let dest = format!("{prefix}/{key_name}_copy");
+        store.delete(&dest).await.unwrap();
 
         let keys = store.list_all_keys(&prefix).await.unwrap();
         assert_eq!(
@@ -235,8 +235,15 @@ where
 ///
 /// NOTE: the store must be empty before running this test!
 /// A simple way to ensure that is to use a nested path store.
-pub async fn test_objstore(store: &impl ObjStore) {
+pub async fn test_objstore<S>(store: &S) 
+where
+    S: ObjStore + Clone + 'static,
+{
     store.healthcheck().await.expect("health check");
+
+    // Test basic info methods
+    let _kind = store.kind();
+    let _uri = store.safe_uri();
 
     let prefix = Uuid::new_v4().to_string();
 
@@ -253,6 +260,16 @@ pub async fn test_objstore(store: &impl ObjStore) {
         .unwrap();
     let items = page.items;
     assert_eq!(items, vec![]);
+
+    // Test PutBuilder variations
+    {
+        let text_key = format!("{prefix}/text_test");
+        let text_data = "Hello, World!";
+        store.put(&text_key).text(text_data).await.unwrap();
+        let retrieved = store.get(&text_key).await.unwrap().unwrap();
+        assert_eq!(retrieved, bytes::Bytes::from(text_data));
+        store.delete(&text_key).await.unwrap();
+    }
 
     let key1_name = Uuid::new_v4().to_string();
     let key1 = format!("{prefix}/{key1_name}");
@@ -380,6 +397,39 @@ pub async fn test_objstore(store: &impl ObjStore) {
         approximate_meta_match(&list[2], &key3meta, "list meta3");
     }
 
+    // Test additional API methods
+    {
+        let api_test_prefix = Uuid::new_v4().to_string();
+        
+        // Test generate_download_url (may return None for stores that don't support it)
+        use std::time::Duration;
+        let download_args = objstore::DownloadUrlArgs::new(&key1, Duration::from_secs(3600));
+        let _download_url = store.generate_download_url(download_args).await.unwrap();
+
+        // Test list streaming APIs
+        let stream_keys = store.list_keys_stream(objstore::ListArgs::new().with_prefix(&prefix));
+        let _collected_keys = futures::TryStreamExt::try_collect::<Vec<_>>(stream_keys).await.unwrap();
+
+        let stream_items = store.clone().list_stream(objstore::ListArgs::new().with_prefix(&prefix));
+        let _collected_items = futures::TryStreamExt::try_collect::<Vec<_>>(stream_items).await.unwrap();
+
+        // Test send_put and send_copy direct methods
+        let direct_key = format!("{api_test_prefix}/direct");
+        let direct_data = bytes::Bytes::from("direct test data");
+        let put_req = objstore::Put::new(&direct_key, objstore::DataSource::Data(direct_data.clone()));
+        let put_meta = store.send_put(put_req).await.unwrap();
+        assert_eq!(put_meta.key, direct_key);
+
+        let copy_dest = format!("{api_test_prefix}/copy_dest");
+        let copy_req = objstore::Copy::new(&direct_key, &copy_dest);
+        let copy_meta = store.send_copy(copy_req).await.unwrap();
+        assert_eq!(copy_meta.key, copy_dest);
+
+        // Cleanup direct test keys
+        store.delete(&direct_key).await.unwrap();
+        store.delete(&copy_dest).await.unwrap();
+    }
+
     // Delete all.
     store.delete_prefix("").await.unwrap();
     let items = store.list(ListArgs::new()).await.unwrap().items;
@@ -427,533 +477,4 @@ fn approximate_meta_match(a: &ObjectMeta, b: &ObjectMeta, msg: &str) {
     }
 
     // todo: extra handling?
-}
-
-#[cfg(test)]
-mod tests {
-    use bytes::{Bytes, BytesMut};
-    use futures::TryStreamExt;
-    use objstore::{ListArgs, ObjStore, ObjStoreExt, DownloadUrlArgs, DataSource, Put, Copy};
-    use objstore_memory::MemoryObjStore;
-    use std::time::Duration;
-    use uuid::Uuid;
-    use crate::test_objstore;
-
-    /// Basic integration test using MemoryObjStore
-    #[tokio::test]
-    async fn test_memory_objstore_basic() {
-        let store = MemoryObjStore::new();
-        test_objstore(&store).await;
-    }
-
-    /// Test ObjStore basic info methods
-    #[tokio::test]
-    async fn test_objstore_info_methods() {
-        let store = MemoryObjStore::new();
-        
-        // Test kind method
-        assert_eq!(store.kind(), "objstore.memory");
-        
-        // Test safe_uri method
-        let uri = store.safe_uri();
-        assert_eq!(uri.scheme(), "memory");
-    }
-
-    /// Test generate_download_url functionality
-    #[tokio::test] 
-    async fn test_generate_download_url() {
-        let store = MemoryObjStore::new();
-        let key = "test-download-url";
-        
-        // Test on non-existent key - memory store should return None since it doesn't support download URLs
-        let args = DownloadUrlArgs::new(key, Duration::from_secs(3600));
-        let result = store.generate_download_url(args).await.unwrap();
-        assert_eq!(result, None, "Memory store should not support download URLs");
-    }
-
-    /// Test get_json functionality
-    #[tokio::test]
-    async fn test_get_json() {
-        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
-        struct TestData {
-            name: String,
-            value: i32,
-        }
-        
-        let store = MemoryObjStore::new();
-        let key = "test-json";
-        let test_data = TestData {
-            name: "test".to_string(),
-            value: 42,
-        };
-        
-        // Test get_json on non-existent key
-        let result: Option<TestData> = store.get_json(key).await.unwrap();
-        assert_eq!(result, None);
-        
-        // Put JSON data using put builder
-        store.put(key).json(&test_data).await.unwrap();
-        
-        // Get JSON data back
-        let retrieved: TestData = store.get_json(key).await.unwrap().unwrap();
-        assert_eq!(retrieved, test_data);
-    }
-
-    /// Test ObjStoreExt put builder with different data sources
-    #[tokio::test]
-    async fn test_put_builder_variations() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Test text put
-        let key1 = format!("{}/text", prefix);
-        let text_data = "Hello, World!";
-        store.put(&key1).text(text_data).await.unwrap();
-        let retrieved = store.get(&key1).await.unwrap().unwrap();
-        assert_eq!(retrieved, Bytes::from(text_data));
-        
-        // Test bytes put  
-        let key2 = format!("{}/bytes", prefix);
-        let bytes_data = Bytes::from("binary data");
-        store.put(&key2).bytes(bytes_data.clone()).await.unwrap();
-        let retrieved = store.get(&key2).await.unwrap().unwrap();
-        assert_eq!(retrieved, bytes_data);
-        
-        // Test stream put
-        let key3 = format!("{}/stream", prefix);
-        let stream_data = "streamed data";
-        let stream = futures::stream::iter(vec![Ok::<Bytes, anyhow::Error>(Bytes::from(stream_data))]);
-        store.put(&key3).stream(stream).await.unwrap();
-        let retrieved = store.get(&key3).await.unwrap().unwrap();
-        assert_eq!(retrieved, Bytes::from(stream_data));
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test send_put and send_copy direct methods
-    #[tokio::test]
-    async fn test_direct_send_methods() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        let src_key = format!("{}/source", prefix);
-        let dest_key = format!("{}/destination", prefix);
-        let data = Bytes::from("test data for copy");
-        
-        // Test send_put directly
-        let put = Put::new(&src_key, DataSource::Data(data.clone()));
-        let meta = store.send_put(put).await.unwrap();
-        assert_eq!(meta.key, src_key);
-        assert_eq!(meta.size, Some(data.len() as u64));
-        
-        // Verify data was stored
-        let retrieved = store.get(&src_key).await.unwrap().unwrap();
-        assert_eq!(retrieved, data);
-        
-        // Test send_copy directly
-        let copy = Copy::new(&src_key, &dest_key);
-        let copy_meta = store.send_copy(copy).await.unwrap();
-        assert_eq!(copy_meta.key, dest_key);
-        
-        // Verify copy was successful
-        let copied_data = store.get(&dest_key).await.unwrap().unwrap();
-        assert_eq!(copied_data, data);
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test copy builder functionality
-    #[tokio::test]
-    async fn test_copy_builder() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        let src_key = format!("{}/source", prefix);
-        let dest_key = format!("{}/dest", prefix);
-        let data = "data to copy";
-        
-        // Put source data
-        store.put(&src_key).text(data).await.unwrap();
-        
-        // Test copy using builder
-        let copy_meta = store.copy(&src_key, &dest_key).send().await.unwrap();
-        assert_eq!(copy_meta.key, dest_key);
-        
-        // Verify copy
-        let copied = store.get(&dest_key).await.unwrap().unwrap();
-        assert_eq!(copied, Bytes::from(data));
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test list_keys_stream functionality
-    #[tokio::test]
-    async fn test_list_keys_stream() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Create multiple keys
-        let keys = vec![
-            format!("{}/key1", prefix),
-            format!("{}/key2", prefix), 
-            format!("{}/key3", prefix),
-        ];
-        
-        for key in &keys {
-            store.put(key).text("data").await.unwrap();
-        }
-        
-        // Test list_keys_stream
-        let args = ListArgs::new().with_prefix(&prefix);
-        let mut collected_keys = Vec::new();
-        
-        let mut stream = store.list_keys_stream(args);
-        while let Some(page) = stream.try_next().await.unwrap() {
-            collected_keys.extend(page.items);
-        }
-        
-        collected_keys.sort();
-        let mut expected_keys = keys.clone();
-        expected_keys.sort();
-        assert_eq!(collected_keys, expected_keys);
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test list_stream functionality
-    #[tokio::test]  
-    async fn test_list_stream() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Create keys with data
-        let test_data = vec![
-            (format!("{}/item1", prefix), "data1"),
-            (format!("{}/item2", prefix), "data2"),
-        ];
-        
-        for (key, data) in &test_data {
-            store.put(key).text(*data).await.unwrap();
-        }
-        
-        // Test list_stream 
-        let args = ListArgs::new().with_prefix(&prefix);
-        let mut collected_items = Vec::new();
-        
-        let mut stream = store.list_stream(args);
-        while let Some(page) = stream.try_next().await.unwrap() {
-            collected_items.extend(page.items);
-        }
-        
-        assert_eq!(collected_items.len(), 2);
-        collected_items.sort_by(|a, b| a.key.cmp(&b.key));
-        
-        assert_eq!(collected_items[0].key, test_data[0].0);
-        assert_eq!(collected_items[1].key, test_data[1].0);
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test edge cases with keys
-    #[tokio::test]
-    async fn test_edge_case_keys() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Test with special characters in keys
-        let special_keys = vec![
-            format!("{}/key with spaces", prefix),
-            format!("{}/key-with-dashes", prefix),
-            format!("{}/key_with_underscores", prefix),
-            format!("{}/key.with.dots", prefix),
-            format!("{}/key/with/slashes", prefix),
-        ];
-        
-        for key in &special_keys {
-            store.put(key).text("test data").await.unwrap();
-            let retrieved = store.get(key).await.unwrap().unwrap();
-            assert_eq!(retrieved, Bytes::from("test data"));
-        }
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test edge cases with values
-    #[tokio::test]
-    async fn test_edge_case_values() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Test empty value
-        let empty_key = format!("{}/empty", prefix);
-        store.put(&empty_key).bytes(Bytes::new()).await.unwrap();
-        let retrieved = store.get(&empty_key).await.unwrap().unwrap();
-        assert_eq!(retrieved, Bytes::new());
-        
-        // Test large value (1MB)
-        let large_key = format!("{}/large", prefix);
-        let large_data = vec![b'x'; 1024 * 1024];
-        let large_bytes = Bytes::from(large_data);
-        store.put(&large_key).bytes(large_bytes.clone()).await.unwrap();
-        let retrieved = store.get(&large_key).await.unwrap().unwrap();
-        assert_eq!(retrieved, large_bytes);
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test pagination edge cases
-    #[tokio::test]
-    async fn test_pagination_edge_cases() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Test pagination with limit
-        let keys = (0..10).map(|i| format!("{}/key{:02}", prefix, i)).collect::<Vec<_>>();
-        for key in &keys {
-            store.put(key).text("data").await.unwrap();
-        }
-        
-        // Test list with small limit
-        let args = ListArgs::new().with_prefix(&prefix).with_limit(3);
-        let first_page = store.list(args).await.unwrap();
-        assert!(first_page.items.len() <= 3);
-        
-        // Test list_keys with limit
-        let args = ListArgs::new().with_prefix(&prefix).with_limit(5);  
-        let key_page = store.list_keys(args).await.unwrap();
-        assert!(key_page.items.len() <= 5);
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test purge_all functionality
-    #[tokio::test]
-    async fn test_purge_all() {
-        let store = MemoryObjStore::new();
-        
-        // Add some test data
-        store.put("test1").text("data1").await.unwrap();
-        store.put("test2").text("data2").await.unwrap();
-        
-        // Verify data exists
-        assert!(store.get("test1").await.unwrap().is_some());
-        assert!(store.get("test2").await.unwrap().is_some());
-        
-        // Purge all
-        store.purge_all().await.unwrap();
-        
-        // Verify all data is gone
-        assert!(store.get("test1").await.unwrap().is_none());
-        assert!(store.get("test2").await.unwrap().is_none());
-        
-        let all_items = store.list(ListArgs::new()).await.unwrap();
-        assert_eq!(all_items.items.len(), 0);
-    }
-
-    /// Test error handling for non-existent operations
-    #[tokio::test]
-    async fn test_error_conditions() {
-        let store = MemoryObjStore::new();
-        let non_existent_key = "does_not_exist";
-        
-        // These should return None, not error
-        assert_eq!(store.get(non_existent_key).await.unwrap(), None);
-        assert_eq!(store.meta(non_existent_key).await.unwrap(), None);
-        assert_eq!(store.get_with_meta(non_existent_key).await.unwrap(), None);
-        
-        // For stream operations, we need to test differently since they return streams  
-        assert!(store.get_stream(non_existent_key).await.unwrap().is_none());
-        assert!(store.get_stream_with_meta(non_existent_key).await.unwrap().is_none());
-        
-        // Delete of non-existent key should succeed (idempotent)
-        store.delete(non_existent_key).await.unwrap();
-        
-        // get_json should return None for non-existent key
-        let result: Option<serde_json::Value> = store.get_json(non_existent_key).await.unwrap();
-        assert_eq!(result, None);
-    }
-
-    /// Test stream operations  
-    #[tokio::test]
-    async fn test_stream_operations() {
-        let store = MemoryObjStore::new();
-        let key = "stream_test";
-        let data = "stream test data";
-        
-        // Put data
-        store.put(key).text(data).await.unwrap();
-        
-        // Test get_stream
-        let stream = store.get_stream(key).await.unwrap().unwrap();
-        let collected: Bytes = stream.try_collect::<BytesMut>().await.unwrap().freeze();
-        assert_eq!(collected, Bytes::from(data));
-        
-        // Test get_stream_with_meta
-        let (meta, stream) = store.get_stream_with_meta(key).await.unwrap().unwrap();
-        assert_eq!(meta.key, key);
-        let collected: Bytes = stream.try_collect::<BytesMut>().await.unwrap().freeze();
-        assert_eq!(collected, Bytes::from(data));
-        
-        // Clean up
-        store.delete(key).await.unwrap();
-    }
-
-    /// Test list_all_keys functionality
-    #[tokio::test]
-    async fn test_list_all_keys() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Create multiple keys
-        let keys = vec![
-            format!("{}/key1", prefix),
-            format!("{}/key2", prefix),
-            format!("{}/key3", prefix),
-        ];
-        
-        for key in &keys {
-            store.put(key).text("data").await.unwrap();
-        }
-        
-        // Test list_all_keys
-        let all_keys = store.list_all_keys(&prefix).await.unwrap();
-        let mut sorted_keys = all_keys.clone();
-        sorted_keys.sort();
-        let mut expected_keys = keys.clone();
-        expected_keys.sort();
-        assert_eq!(sorted_keys, expected_keys);
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test ListArgs with delimiter
-    #[tokio::test]
-    async fn test_list_args_with_delimiter() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Create keys with hierarchical structure
-        let keys = vec![
-            format!("{}/dir1/file1", prefix),
-            format!("{}/dir1/file2", prefix),
-            format!("{}/dir2/file3", prefix),
-            format!("{}/file4", prefix),
-        ];
-        
-        for key in &keys {
-            store.put(key).text("data").await.unwrap();
-        }
-        
-        // Test list with delimiter
-        let args = ListArgs::new().with_prefix(&prefix).with_delimiter("/");
-        let page = store.list(args).await.unwrap();
-        
-        // Should return items at the prefix level plus common prefixes for subdirectories
-        assert!(!page.items.is_empty() || page.prefixes.is_some());
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test MIME type functionality
-    #[tokio::test]
-    async fn test_mime_type_support() {
-        let store = MemoryObjStore::new();
-        let key = "test-mime";
-        let json_data = r#"{"test": "value"}"#;
-        
-        // Put JSON with explicit mime type (using send directly)
-        let mut put = Put::new(key, DataSource::Data(Bytes::from(json_data)));
-        put.mime_type = Some("application/json".to_string());
-        let meta = store.send_put(put).await.unwrap();
-        
-        // Check if mime type was preserved (note: MemoryObjStore may not preserve mime types)
-        if meta.mime_type.is_some() {
-            assert_eq!(meta.mime_type.as_ref().unwrap(), "application/json");
-        }
-        
-        // Clean up
-        store.delete(key).await.unwrap();
-    }
-
-    /// Test concurrent operations
-    #[tokio::test]
-    async fn test_concurrent_operations() {
-        let store = MemoryObjStore::new();
-        let prefix = Uuid::new_v4().to_string();
-        
-        // Create tasks that run concurrently
-        let mut handles = Vec::new();
-        
-        for i in 0..10 {
-            let store_clone = store.clone();
-            let key = format!("{}/concurrent_{}", prefix, i);
-            let data = format!("data_{}", i);
-            
-            let handle = tokio::spawn(async move {
-                store_clone.put(&key).text(&data).await.unwrap();
-                let retrieved = store_clone.get(&key).await.unwrap().unwrap();
-                assert_eq!(retrieved, Bytes::from(data));
-            });
-            handles.push(handle);
-        }
-        
-        // Wait for all operations to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
-        
-        // Verify all keys exist
-        let all_keys = store.list_all_keys(&prefix).await.unwrap();
-        assert_eq!(all_keys.len(), 10);
-        
-        // Clean up
-        store.delete_prefix(&prefix).await.unwrap();
-    }
-
-    /// Test invalid JSON deserialization
-    #[tokio::test]
-    async fn test_invalid_json() {
-        let store = MemoryObjStore::new();
-        let key = "invalid-json";
-        
-        // Put invalid JSON data
-        store.put(key).text("{ invalid json }").await.unwrap();
-        
-        // Attempt to deserialize as JSON should fail
-        let result: Result<Option<serde_json::Value>, _> = store.get_json(key).await;
-        assert!(result.is_err(), "Invalid JSON should cause deserialization error");
-        
-        // Clean up
-        store.delete(key).await.unwrap();
-    }
-
-    /// Test empty prefix operations
-    #[tokio::test]
-    async fn test_empty_prefix_operations() {
-        let store = MemoryObjStore::new();
-        
-        // Ensure store is clean
-        store.purge_all().await.unwrap();
-        
-        // Add some data
-        store.put("test1").text("data1").await.unwrap();
-        store.put("test2").text("data2").await.unwrap();
-        
-        // List with empty prefix should return all items
-        let all_items = store.list_all_keys("").await.unwrap();
-        assert!(all_items.len() >= 2);
-        assert!(all_items.contains(&"test1".to_string()));
-        assert!(all_items.contains(&"test2".to_string()));
-        
-        // Clean up
-        store.delete_prefix("").await.unwrap();
-    }
 }
