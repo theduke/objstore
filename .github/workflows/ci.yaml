@@ -51,6 +51,11 @@ jobs:
       run: cargo test --workspace --no-run
     - name: Test
       run: cargo hack test --each-feature --workspace
+
+    - name: Test minio with s3-light
+      if: runner.os == 'Linux'
+      run: make test-minio-s3-light
+      
   msrv:
     name: "Check MSRV"
     runs-on: ubuntu-latest
