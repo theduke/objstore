@@ -94,6 +94,17 @@ impl S3ObjStore {
         })
     }
 
+    /// Create the configured bucket using a signed S3 PUT request.
+    pub async fn bucket_create(&self) -> Result<(), anyhow::Error> {
+        let action = self.state.bucket.create_bucket(&self.state.creds);
+        let url = action.sign(Self::DURATION);
+
+        let res = self.state.client.put(url).send().await?;
+        Self::error_for_status(res).await?;
+
+        Ok(())
+    }
+
     fn build_key<'a>(&self, key: &'a str) -> Cow<'a, str> {
         let key = key.trim_start_matches('/');
 
@@ -634,6 +645,10 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use sha2::{Digest, Sha256};
 
+    fn read_create_bucket() -> bool {
+        std::env::var("TEST_CREATE_BUCKET").ok().unwrap_or_default() == "1"
+    }
+
     fn test_strict() -> bool {
         std::env::var("TEST_STRICT").is_ok()
     }
@@ -699,7 +714,15 @@ mod tests {
             return;
         };
 
+        let create = read_create_bucket();
         let store = S3ObjStore::new(config.clone()).expect("failed to create s3 kv store");
+
+        if create {
+            store
+                .bucket_create()
+                .await
+                .expect("failed to create s3 bucket");
+        }
 
         // Test with prefix.
         objstore_test::test_objstore(&store).await;
