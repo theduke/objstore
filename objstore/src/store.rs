@@ -413,6 +413,7 @@ where
             mime_type: None,
         }
     }
+
     /// Begin a copy operation from `src` to `dest`, allows setting conditions.
     fn copy(&self, src: &str, dest: &str) -> CopyBuilder<'_, Self> {
         CopyBuilder {
