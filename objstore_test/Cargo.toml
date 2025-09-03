@@ -8,6 +8,8 @@ license.workspace = true
 readme.workspace = true
 edition.workspace = true
 
+publish = false
+
 [dependencies]
 objstore.workspace = true
 
