@@ -10,6 +10,7 @@ edition.workspace = true
 
 [dependencies]
 objstore.workspace = true
+objstore_memory = { path = "../objstore_memory" }
 
 tokio = { workspace = true, features = ["macros", "rt"] }
 uuid = { workspace = true, features = ["v4"] }
@@ -18,6 +19,8 @@ futures.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
 time.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 pretty_assertions = "1.4.1"
 md5 = "0.8.0"
