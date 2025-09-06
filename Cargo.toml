@@ -8,8 +8,9 @@ members = [
     "objstore_memory",
     "objstore_s3_light",
     "objstore_test",
+    "objstore_sftp",
 
-    "examples", "objstore_ftp",
+    "examples",
 ]
 exclude = [
     "ui",
@@ -39,6 +40,7 @@ sha2 = "0.10"
 time = "0.3.41"
 tracing = "0.1"
 uuid = "1"
+test-log = { version = "0.2.18", features = ["trace"] }
 
 [workspace.dependencies.objstore]
 version = "0.1.0"

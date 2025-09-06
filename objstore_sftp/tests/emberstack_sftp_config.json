@@ -1,0 +1,15 @@
+{
+    "Global": {
+        "Chroot": {
+            "Directory": "%h",
+            "StartPath": "sftp"
+        },
+        "Directories": ["sftp"]
+    },
+    "Users": [
+        {
+            "Username": "user1",
+            "Password": "pw1"
+        }
+    ]
+}

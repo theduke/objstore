@@ -1,0 +1,15 @@
+
+# Starts an SFTP server on port 2222
+# Users:
+# - user1 // pw1
+
+services:
+  sftp:
+    image: "emberstack/sftp"
+    ports:
+      - "2222:22"
+    volumes:
+      - ./emberstack_sftp_config.json:/app/config/sftp.json:ro
+
+volumes:
+  sftp-upload:

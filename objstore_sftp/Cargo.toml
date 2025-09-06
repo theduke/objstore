@@ -1,0 +1,31 @@
+[package]
+name = "objstore_sftp"
+version = "0.1.0"
+authors.workspace = true
+readme.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+[dependencies]
+objstore = { path = "../objstore", version = "0.1.0" }
+
+russh = "0.54.3"
+russh-sftp = "2.1.1"
+
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+serde = { workspace = true, features = ["derive"] }
+time.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
+url.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+objstore_test = { path = "../objstore_test" }
+pretty_assertions.workspace = true
+test-log.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
