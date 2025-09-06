@@ -1,0 +1,35 @@
+
+# docker compose file
+# Starts an FTP server
+#
+# Port: 9021
+# Users:
+#   - user1 // user1pw1
+
+services:
+    ftp-server:
+        container_name: my-ftp-server
+        environment:
+            - PUBLIC_IP=127.0.0.1
+            - FTP_USER=user1
+            - FTP_PASS=user1pw1
+        image: garethflowers/ftp-server
+        ports:
+            - "9020-9021:20-21/tcp"
+            - "40000-40009:40000-40009/tcp" # For passive mode
+        volumes:
+            - "/data:/home/user"
+
+# services:
+#   ftp:
+#     image: delfer/alpine-ftp-server
+#     container_name: ftp
+#     # restart: unless-stopped
+#     ports:
+#       - "9021:21"
+#       - "21000-21010:21000-21010"
+#     environment:
+#       - USERS="user1|pw1"
+#       # - ADDRESS=ftp.site.domain
+#       # - TLS_CERT="/etc/letsencrypt/live/vds2291318.my-ihor.ru/fullchain.pem"
+#       # - TLS_KEY="/etc/letsencrypt/live/vds2291318.my-ihor.ru/privkey.pem"
