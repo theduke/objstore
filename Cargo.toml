@@ -9,7 +9,7 @@ members = [
     "objstore_s3_light",
     "objstore_test",
 
-    "examples",
+    "examples", "objstore_ftp",
 ]
 exclude = [
     "ui",
