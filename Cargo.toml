@@ -1,15 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
+    "objstore_test",
+
+    "examples",
+
     "objstore",
     "objstore_config",
-    "objstore_fs",
+
     "objstore_fs",
     "objstore_memory",
     "objstore_s3_light",
-    "objstore_test",
-
-    "examples", "objstore_logfs",
+    "objstore_logfs",
 ]
 exclude = [
     "ui",
