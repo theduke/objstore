@@ -95,10 +95,10 @@ async fn list_dir_rec(
             let meta = entry.metadata().await?;
             let key = entry.file_name().to_string_lossy().to_string();
 
-            if let Some(prefix) = &prefix_filter {
-                if !key.starts_with(prefix) {
-                    continue;
-                }
+            if let Some(prefix) = &prefix_filter
+                && !key.starts_with(prefix)
+            {
+                continue;
             }
 
             if !meta.is_file() {
@@ -128,10 +128,10 @@ async fn list_dir_rec(
                 }
             }
 
-            if let Some(cursor) = cursor {
-                if key.as_str() <= cursor || key.as_str() == cursor {
-                    continue;
-                }
+            if let Some(cursor) = cursor
+                && (key.as_str() <= cursor || key.as_str() == cursor)
+            {
+                continue;
             }
 
             let full_key = if current_path.is_empty() {

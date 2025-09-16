@@ -103,23 +103,23 @@ impl LogFsObjStore {
                 processed += 1;
                 last_processed = Some(key.clone());
 
-                if let Some(delim) = delimiter.as_deref() {
-                    if !delim.is_empty() {
-                        let stripped = key
-                            .strip_prefix(&prefix)
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| key.clone());
-                        if let Some(idx) = stripped.find(delim) {
-                            let dir = &stripped[..idx];
-                            let mut full = prefix.clone();
-                            full.push_str(dir);
-                            directories.insert(full);
-                            if processed >= limit {
-                                truncated = true;
-                                break;
-                            }
-                            continue;
+                if let Some(delim) = delimiter.as_deref()
+                    && !delim.is_empty()
+                {
+                    let stripped = key
+                        .strip_prefix(&prefix)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| key.clone());
+                    if let Some(idx) = stripped.find(delim) {
+                        let dir = &stripped[..idx];
+                        let mut full = prefix.clone();
+                        full.push_str(dir);
+                        directories.insert(full);
+                        if processed >= limit {
+                            truncated = true;
+                            break;
                         }
+                        continue;
                     }
                 }
 
@@ -163,8 +163,8 @@ impl LogFsObjStore {
             match log.get_chunks(&path) {
                 Ok(mut reader) => {
                     let _ = ready_tx.send(Ok(true));
-                    while let Some(chunk) = reader.next() {
-                        let chunk = chunk.map(|data| Bytes::from(data));
+                    for chunk in reader.by_ref() {
+                        let chunk = chunk.map(Bytes::from);
                         if tx.blocking_send(chunk).is_err() {
                             break;
                         }
@@ -185,10 +185,9 @@ impl LogFsObjStore {
         {
             Ok(true) => {
                 let stream = futures::stream::unfold(rx, |mut rx| async {
-                    match rx.recv().await {
-                        Some(item) => Some((item.map_err(map_logfs_err), rx)),
-                        None => None,
-                    }
+                    rx.recv()
+                        .await
+                        .map(|item| (item.map_err(map_logfs_err), rx))
                 });
                 Ok(Some(Box::pin(stream)))
             }
@@ -255,10 +254,10 @@ impl ObjStore for LogFsObjStore {
         &self,
         key: &str,
     ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error> {
-        if let Some(meta) = self.meta(key).await? {
-            if let Some(stream) = self.get_stream(key).await? {
-                return Ok(Some((meta, stream)));
-            }
+        if let Some(meta) = self.meta(key).await?
+            && let Some(stream) = self.get_stream(key).await?
+        {
+            return Ok(Some((meta, stream)));
         }
         Ok(None)
     }

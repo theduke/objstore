@@ -52,15 +52,15 @@ impl ObjectMeta {
     ///
     /// Useful for normalizing timestamps due to differing precisions in the backend.
     pub fn round_timestamps_second(&mut self) {
-        if let Some(ts) = self.created_at.as_mut() {
-            if let Ok(new) = ts.replace_millisecond(0) {
-                *ts = new;
-            }
+        if let Some(ts) = self.created_at.as_mut()
+            && let Ok(new) = ts.replace_millisecond(0)
+        {
+            *ts = new;
         }
-        if let Some(ts) = self.updated_at.as_mut() {
-            if let Ok(new) = ts.replace_millisecond(0) {
-                *ts = new;
-            }
+        if let Some(ts) = self.updated_at.as_mut()
+            && let Ok(new) = ts.replace_millisecond(0)
+        {
+            *ts = new;
         }
     }
 
@@ -68,19 +68,17 @@ impl ObjectMeta {
     ///
     /// Useful for normalizing timestamps due to differing precisions in the backend.
     pub fn round_timestamps_minute(&mut self) {
-        if let Some(ts) = self.created_at.as_mut() {
-            if let Ok(new1) = ts.replace_millisecond(0) {
-                if let Ok(new) = new1.replace_minute(0) {
-                    *ts = new;
-                }
-            }
+        if let Some(ts) = self.created_at.as_mut()
+            && let Ok(new1) = ts.replace_millisecond(0)
+            && let Ok(new) = new1.replace_minute(0)
+        {
+            *ts = new;
         }
-        if let Some(ts) = self.updated_at.as_mut() {
-            if let Ok(new) = ts.replace_millisecond(0) {
-                if let Ok(new) = new.replace_minute(0) {
-                    *ts = new;
-                }
-            }
+        if let Some(ts) = self.updated_at.as_mut()
+            && let Ok(new) = ts.replace_millisecond(0)
+            && let Ok(new) = new.replace_minute(0)
+        {
+            *ts = new;
         }
     }
 

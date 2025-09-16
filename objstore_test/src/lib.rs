@@ -45,7 +45,7 @@ pub async fn test_objstore(store: &impl ObjStore) {
 }
 
 async fn test_full_flow(store: &impl ObjStore, prefix: &str) {
-    let keys = store.list_all_keys(&prefix).await.unwrap();
+    let keys = store.list_all_keys(prefix).await.unwrap();
     assert!(keys.is_empty());
 
     let page = store
