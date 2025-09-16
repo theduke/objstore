@@ -11,6 +11,182 @@ use sha2::Digest as _;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+/// Test an ObjStore implementation.
+///
+/// NOTE: the store must be empty before running this test!
+/// A simple way to ensure that is to use a nested path store.
+pub async fn test_objstore(store: &impl ObjStore) {
+    tracing::info!("testing object store implementation: {store:?}");
+
+    tracing::info!("running ObjStore::healthcheck()");
+    store.healthcheck().await.expect("health check");
+
+    let prefix = Uuid::new_v4().to_string();
+    store.delete_prefix(&prefix).await.unwrap();
+
+    let keys = store.list_all_keys(&prefix).await.unwrap();
+    assert!(keys.is_empty());
+
+    tracing::info!("running test_single_key_flow()");
+    test_single_key_flow(store, &prefix).await;
+    tracing::info!("finished test_single_key_flow()");
+
+    let keys = store.list_all_keys(&prefix).await.unwrap();
+    assert!(keys.is_empty());
+
+    tracing::info!("running test_full_flow()");
+    test_full_flow(store, &prefix).await;
+    tracing::info!("finished test_full_flow()");
+
+    // Delete all.
+    store.delete_prefix("").await.unwrap();
+    let items = store.list(ListArgs::new()).await.unwrap().items;
+    assert_eq!(items.len(), 0);
+}
+
+async fn test_full_flow(store: &impl ObjStore, prefix: &str) {
+    let keys = store.list_all_keys(&prefix).await.unwrap();
+    assert!(keys.is_empty());
+
+    let page = store
+        .list(ListArgs::new().with_prefix(prefix))
+        .await
+        .unwrap();
+    let items = page.items;
+    assert_eq!(items, vec![]);
+
+    let key1_name = Uuid::new_v4().to_string();
+    let key1 = format!("{prefix}/{key1_name}");
+    let value1 = "hello";
+
+    let v = store.get(&key1).await.unwrap();
+    assert!(v.is_none());
+    let v = store.get_with_meta(&key1).await.unwrap();
+    assert!(v.is_none());
+    let v = store.meta(&key1).await.unwrap();
+    assert!(v.is_none());
+
+    store.put(&key1).bytes(value1).await.unwrap();
+    let key1_created_at = OffsetDateTime::now_utc();
+    let key1_meta = {
+        let mut m = ObjectMeta::new(key1.clone());
+        m.size = Some(value1.len() as u64);
+        m.created_at = Some(key1_created_at);
+        m.updated_at = Some(key1_created_at);
+        m.hash_md5 = Some(md5::compute(value1.as_bytes()).0);
+        m.hash_sha256 = Some(sha2::Sha256::digest(value1).into());
+        m
+    };
+
+    let v = store.get(&key1).await.unwrap().unwrap();
+    assert_eq!(v.as_ref(), b"hello");
+
+    let (v, meta1) = store.get_with_meta(&key1).await.unwrap().unwrap();
+    assert_eq!(v.as_ref(), b"hello");
+    approximate_meta_match(&key1_meta, &meta1, "get_with_meta");
+
+    let meta2 = store.meta(&key1).await.unwrap().unwrap();
+    approximate_meta_match(&key1_meta, &meta2, "meta");
+
+    // with prefix
+    let nested_prefix = format!("{}/{}", prefix, &key1_name[0..5]);
+    let mut items = store
+        .list(ListArgs::new().with_prefix(&nested_prefix))
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(items.len(), 1);
+    items.iter_mut().for_each(|m| m.round_timestamps_second());
+    approximate_meta_match(&key1_meta, &items[0], "list with prefix");
+
+    store.delete(&key1).await.unwrap();
+    let v = store.get(&key1).await.unwrap();
+    assert!(v.is_none());
+    let v = store.get_with_meta(&key1).await.unwrap();
+    assert!(v.is_none());
+    let v = store.meta(&key1).await.unwrap();
+    assert!(v.is_none());
+
+    let items = store
+        .list(ListArgs::new().with_prefix(prefix))
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(items.len(), 0);
+
+    // MULTI-KEY
+    let prefix = Uuid::new_v4().to_string();
+    let key1 = format!("{prefix}/key1");
+    let value1 = "val1";
+    let key2 = format!("{prefix}/key2");
+    let value2 = "val2";
+    let key3 = format!("{prefix}/key3");
+    let value3 = "val3";
+
+    let created = OffsetDateTime::now_utc();
+
+    let key1meta = {
+        let mut m = ObjectMeta::new(key1.clone());
+        m.size = Some(value1.len() as u64);
+        m.created_at = Some(created);
+        m.updated_at = Some(created);
+        m.hash_md5 = Some(md5::compute(value1.as_bytes()).0);
+        m.hash_sha256 = Some(sha2::Sha256::digest(value1).into());
+        m
+    };
+    let key2meta = {
+        let mut m = ObjectMeta::new(key2.clone());
+        m.size = Some(value2.len() as u64);
+        m.created_at = Some(created);
+        m.updated_at = Some(created);
+        m.hash_md5 = Some(md5::compute(value2.as_bytes()).0);
+        m.hash_sha256 = Some(sha2::Sha256::digest(value2).into());
+        m
+    };
+    let key3meta = {
+        let mut m = ObjectMeta::new(key3.clone());
+        m.size = Some(value3.len() as u64);
+        m.created_at = Some(created);
+        m.updated_at = Some(created);
+        m.hash_md5 = Some(md5::compute(value3.as_bytes()).0);
+        m.hash_sha256 = Some(sha2::Sha256::digest(value3).into());
+        m
+    };
+
+    store.put(&key1).bytes("val1").await.unwrap();
+    store.put(&key2).bytes("val2").await.unwrap();
+    store.put(&key3).bytes("val3").await.unwrap();
+
+    {
+        let meta1 = store.meta(&key1).await.unwrap().unwrap();
+        let meta2 = store.meta(&key2).await.unwrap().unwrap();
+        let meta3 = store.meta(&key3).await.unwrap().unwrap();
+        approximate_meta_match(&meta1, &key1meta, "multi-key meta1");
+        approximate_meta_match(&meta2, &key2meta, "multi-key meta2");
+        approximate_meta_match(&meta3, &key3meta, "multi-key meta3");
+    }
+
+    {
+        let mut list = store
+            .list(ListArgs::new().with_prefix(&prefix))
+            .await
+            .unwrap()
+            .items;
+        assert_eq!(list.len(), 3);
+        list.sort_by(|a, b| a.key().cmp(b.key()));
+        list.iter_mut().for_each(|m| m.round_timestamps_second());
+
+        approximate_meta_match(&list[0], &key1meta, "list meta1");
+        approximate_meta_match(&list[1], &key2meta, "list meta2");
+        approximate_meta_match(&list[2], &key3meta, "list meta3");
+    }
+
+    // Delete all.
+    store.delete_prefix("").await.unwrap();
+    let items = store.list(ListArgs::new()).await.unwrap().items;
+    assert_eq!(items.len(), 0);
+}
+
 fn new_keymeta(key: &str, value: &Bytes) -> ObjectMeta {
     let hash = sha2::Sha256::digest(value);
     let now = OffsetDateTime::now_utc();
@@ -229,161 +405,6 @@ where
         // Delete again.
         store.delete(&key).await.unwrap();
     }
-}
-
-/// Test an ObjStore implementation.
-///
-/// NOTE: the store must be empty before running this test!
-/// A simple way to ensure that is to use a nested path store.
-pub async fn test_objstore(store: &impl ObjStore) {
-    store.healthcheck().await.expect("health check");
-
-    let prefix = Uuid::new_v4().to_string();
-
-    store.delete_prefix(&prefix).await.unwrap();
-
-    test_single_key_flow(store, &prefix).await;
-
-    let keys = store.list_all_keys(&prefix).await.unwrap();
-    assert!(keys.is_empty());
-
-    let page = store
-        .list(ListArgs::new().with_prefix(&prefix))
-        .await
-        .unwrap();
-    let items = page.items;
-    assert_eq!(items, vec![]);
-
-    let key1_name = Uuid::new_v4().to_string();
-    let key1 = format!("{prefix}/{key1_name}");
-    let value1 = "hello";
-
-    let v = store.get(&key1).await.unwrap();
-    assert!(v.is_none());
-    let v = store.get_with_meta(&key1).await.unwrap();
-    assert!(v.is_none());
-    let v = store.meta(&key1).await.unwrap();
-    assert!(v.is_none());
-
-    store.put(&key1).bytes(value1).await.unwrap();
-    let key1_created_at = OffsetDateTime::now_utc();
-    let key1_meta = {
-        let mut m = ObjectMeta::new(key1.clone());
-        m.size = Some(value1.len() as u64);
-        m.created_at = Some(key1_created_at);
-        m.updated_at = Some(key1_created_at);
-        m.hash_md5 = Some(md5::compute(value1.as_bytes()).0);
-        m.hash_sha256 = Some(sha2::Sha256::digest(value1).into());
-        m
-    };
-
-    let v = store.get(&key1).await.unwrap().unwrap();
-    assert_eq!(v.as_ref(), b"hello");
-
-    let (v, meta1) = store.get_with_meta(&key1).await.unwrap().unwrap();
-    assert_eq!(v.as_ref(), b"hello");
-    approximate_meta_match(&key1_meta, &meta1, "get_with_meta");
-
-    let meta2 = store.meta(&key1).await.unwrap().unwrap();
-    approximate_meta_match(&key1_meta, &meta2, "meta");
-
-    // with prefix
-    let nested_prefix = format!("{}/{}", prefix, &key1_name[0..5]);
-    let mut items = store
-        .list(ListArgs::new().with_prefix(&nested_prefix))
-        .await
-        .unwrap()
-        .items;
-    assert_eq!(items.len(), 1);
-    items.iter_mut().for_each(|m| m.round_timestamps_second());
-    approximate_meta_match(&key1_meta, &items[0], "list with prefix");
-
-    store.delete(&key1).await.unwrap();
-    let v = store.get(&key1).await.unwrap();
-    assert!(v.is_none());
-    let v = store.get_with_meta(&key1).await.unwrap();
-    assert!(v.is_none());
-    let v = store.meta(&key1).await.unwrap();
-    assert!(v.is_none());
-
-    let items = store
-        .list(ListArgs::new().with_prefix(&prefix))
-        .await
-        .unwrap()
-        .items;
-    assert_eq!(items.len(), 0);
-
-    // MULTI-KEY
-    let prefix = Uuid::new_v4().to_string();
-    let key1 = format!("{prefix}/key1");
-    let value1 = "val1";
-    let key2 = format!("{prefix}/key2");
-    let value2 = "val2";
-    let key3 = format!("{prefix}/key3");
-    let value3 = "val3";
-
-    let created = OffsetDateTime::now_utc();
-
-    let key1meta = {
-        let mut m = ObjectMeta::new(key1.clone());
-        m.size = Some(value1.len() as u64);
-        m.created_at = Some(created);
-        m.updated_at = Some(created);
-        m.hash_md5 = Some(md5::compute(value1.as_bytes()).0);
-        m.hash_sha256 = Some(sha2::Sha256::digest(value1).into());
-        m
-    };
-    let key2meta = {
-        let mut m = ObjectMeta::new(key2.clone());
-        m.size = Some(value2.len() as u64);
-        m.created_at = Some(created);
-        m.updated_at = Some(created);
-        m.hash_md5 = Some(md5::compute(value2.as_bytes()).0);
-        m.hash_sha256 = Some(sha2::Sha256::digest(value2).into());
-        m
-    };
-    let key3meta = {
-        let mut m = ObjectMeta::new(key3.clone());
-        m.size = Some(value3.len() as u64);
-        m.created_at = Some(created);
-        m.updated_at = Some(created);
-        m.hash_md5 = Some(md5::compute(value3.as_bytes()).0);
-        m.hash_sha256 = Some(sha2::Sha256::digest(value3).into());
-        m
-    };
-
-    store.put(&key1).bytes("val1").await.unwrap();
-    store.put(&key2).bytes("val2").await.unwrap();
-    store.put(&key3).bytes("val3").await.unwrap();
-
-    {
-        let meta1 = store.meta(&key1).await.unwrap().unwrap();
-        let meta2 = store.meta(&key2).await.unwrap().unwrap();
-        let meta3 = store.meta(&key3).await.unwrap().unwrap();
-        approximate_meta_match(&meta1, &key1meta, "multi-key meta1");
-        approximate_meta_match(&meta2, &key2meta, "multi-key meta2");
-        approximate_meta_match(&meta3, &key3meta, "multi-key meta3");
-    }
-
-    {
-        let mut list = store
-            .list(ListArgs::new().with_prefix(&prefix))
-            .await
-            .unwrap()
-            .items;
-        assert_eq!(list.len(), 3);
-        list.sort_by(|a, b| a.key().cmp(b.key()));
-        list.iter_mut().for_each(|m| m.round_timestamps_second());
-
-        approximate_meta_match(&list[0], &key1meta, "list meta1");
-        approximate_meta_match(&list[1], &key2meta, "list meta2");
-        approximate_meta_match(&list[2], &key3meta, "list meta3");
-    }
-
-    // Delete all.
-    store.delete_prefix("").await.unwrap();
-    let items = store.list(ListArgs::new()).await.unwrap().items;
-    assert_eq!(items.len(), 0);
 }
 
 fn approximate_datetime_match(a: OffsetDateTime, b: OffsetDateTime, msg: &str) {
