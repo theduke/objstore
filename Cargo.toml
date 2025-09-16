@@ -9,7 +9,7 @@ members = [
     "objstore_s3_light",
     "objstore_test",
 
-    "examples",
+    "examples", "objstore_logfs",
 ]
 exclude = [
     "ui",
@@ -39,6 +39,7 @@ sha2 = "0.10"
 time = "0.3.41"
 tracing = "0.1"
 uuid = "1"
+test-log = "0.2"
 
 [workspace.dependencies.objstore]
 version = "0.1.0"
