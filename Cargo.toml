@@ -12,6 +12,7 @@ members = [
     "objstore_memory",
     "objstore_s3_light",
     "objstore_logfs",
+    "objstore_github",
 ]
 exclude = [
     "ui",

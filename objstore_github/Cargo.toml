@@ -1,0 +1,36 @@
+[package]
+name = "objstore_github"
+version = "0.1.0"
+authors.workspace = true
+keywords.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+edition.workspace = true
+
+[features]
+default = ["rustls"]
+rustls = ["reqwest/rustls-tls"]
+
+[dependencies]
+objstore = { path = "../objstore", version = "0.1.0" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+base64 = "0.22"
+bytes.workspace = true
+futures.workspace = true
+percent-encoding = "2.3.1"
+reqwest = { version = "0.12.22", default-features = false, features = ["json", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time = { workspace = true, features = ["parsing", "formatting"] }
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+url = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+objstore_test = { path = "../objstore_test" }
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
