@@ -2,7 +2,7 @@
   description = "fabric";
 
   inputs = {
-    nixpkgs.url = github:NixOS/nixpkgs/nixos-unstable;
+    # nixpkgs.url = github:NixOS/nixpkgs/nixos-unstable;
     flakeutils = {
       url = "github:numtide/flake-utils";
       inputs.nixpkgs.follows = "nixpkgs";
