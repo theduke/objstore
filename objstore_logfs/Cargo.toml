@@ -3,10 +3,10 @@ name = "objstore_logfs"
 version.workspace = true
 authors.workspace = true
 readme.workspace = true
+description = "logfs backend for objstore"
 keywords.workspace = true
 license.workspace = true
 repository.workspace = true
-edition.workspace = true
 
 publish = false
 

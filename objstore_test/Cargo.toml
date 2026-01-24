@@ -2,11 +2,12 @@
 name = "objstore_test"
 version.workspace = true
 authors.workspace = true
+description = "Test utilities and helpers for running unit and integration tests across the objstore workspace."
 keywords.workspace = true
 repository.workspace = true
 license.workspace = true
 readme.workspace = true
-edition.workspace = true
+
 
 publish = false
 

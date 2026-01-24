@@ -2,11 +2,11 @@
 name = "objstore_memory"
 version.workspace = true
 authors.workspace = true
+description = "Memory backend for objstore"
 keywords.workspace = true
 repository.workspace = true
 license.workspace = true
 readme.workspace = true
-edition.workspace = true
 
 [dependencies]
 objstore.workspace = true

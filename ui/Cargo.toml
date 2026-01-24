@@ -2,6 +2,7 @@
 name = "ui"
 version.workspace = true
 authors = ["Christoph Herzog <chris@theduke.at>"]
+description = "Dioxus-based UI for the objstore project (desktop, web, and mobile frontends)."
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

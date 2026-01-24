@@ -6,7 +6,8 @@ keywords.workspace = true
 repository.workspace = true
 license.workspace = true
 readme.workspace = true
-edition.workspace = true
+description = "Core objstore crate: common traits, types, and APIs used by storage backend implementations."
+
 # rust-version.workspace = true
 
 [features]

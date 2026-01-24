@@ -3,10 +3,10 @@ name = "objstore_config"
 version.workspace = true
 authors.workspace = true
 readme.workspace = true
+description = "Configuration utilities and types for the objstore family of crates."
 keywords.workspace = true
 license.workspace = true
 repository.workspace = true
-edition.workspace = true
 
 [features]
 default = ["tokio"]

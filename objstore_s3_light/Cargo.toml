@@ -2,11 +2,13 @@
 name = "objstore_s3_light"
 version.workspace = true
 authors.workspace = true
+description = "s3_light backend for objstore"
 keywords.workspace = true
 repository.workspace = true
 license.workspace = true
 readme.workspace = true
 edition.workspace = true
+
 
 [features]
 default = ["rustls"]

@@ -2,11 +2,12 @@
 name = "examples"
 version.workspace = true
 authors.workspace = true
+description = "Example programs demonstrating how to use the objstore API and its various storage backends."
 keywords.workspace = true
 repository.workspace = true
 license.workspace = true
 readme.workspace = true
-edition.workspace = true
+
 
 publish = false
 

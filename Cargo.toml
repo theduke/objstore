@@ -20,6 +20,7 @@ exclude = [
 [workspace.package]
 authors = ["Christoph Herzog <chris@theduke.at>"]
 readme = "README.md"
+description = "A lightweight, modular Rust object store abstraction with multiple implementations (filesystem, memory, S3, and log-backed) for testing and production use."
 keywords = [
     "objectstore",
     "kvstore",
