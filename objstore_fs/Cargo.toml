@@ -7,6 +7,7 @@ repository.workspace = true
 license.workspace = true
 readme.workspace = true
 description = "Filesystem backend for objstore"
+edition.workspace = true
 
 [dependencies]
 objstore.workspace = true
