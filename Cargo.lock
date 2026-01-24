@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "objstore",
  "objstore_fs",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "objstore"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "objstore_config"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "objstore_fs"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "objstore_logfs"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "objstore_memory"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "objstore_s3_light"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "objstore_test"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "bytes",

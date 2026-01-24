@@ -1,6 +1,6 @@
 [package]
 name = "ui"
-version = "0.1.0"
+version.workspace = true
 authors = ["Christoph Herzog <chris@theduke.at>"]
 edition = "2021"
 
@@ -15,9 +15,9 @@ mobile = ["dioxus/mobile"]
 
 
 [dependencies]
-objstore = { path = "../objstore" }
-objstore_config = { path = "../objstore_config" }
-objstore_s3_light = { path = "../objstore_s3_light" }
+objstore.workspace = true
+objstore_config.workspace = true
+objstore_s3_light.workspace = true
 
 dioxus-bulma = { path = "../../dioxus-bulma" }
 dioxus = { version = "0.7.0-alpha.3", features = ["router"] }

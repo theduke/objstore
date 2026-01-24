@@ -1,6 +1,6 @@
 [package]
 name = "objstore_memory"
-version = "0.1.0"
+version.workspace = true
 authors.workspace = true
 keywords.workspace = true
 repository.workspace = true
@@ -9,7 +9,7 @@ readme.workspace = true
 edition.workspace = true
 
 [dependencies]
-objstore = { path = "../objstore", version = "0.1.0" }
+objstore.workspace = true
 
 bytes.workspace = true
 time.workspace = true

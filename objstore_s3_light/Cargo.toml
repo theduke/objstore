@@ -1,6 +1,6 @@
 [package]
 name = "objstore_s3_light"
-version = "0.1.0"
+version.workspace = true
 authors.workspace = true
 keywords.workspace = true
 repository.workspace = true
@@ -13,7 +13,7 @@ default = ["rustls"]
 rustls = ["reqwest/rustls-tls"]
 
 [dependencies]
-objstore = { path = "../objstore", version = "0.1.0" }
+objstore.workspace = true
 
 bytes.workspace = true
 time = { workspace = true, features = ["formatting", "parsing"] }
