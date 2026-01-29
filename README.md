@@ -19,6 +19,9 @@ Each backend is available as a separate crate.
   Lightweight S3 backend based on `rusty-s3` and `reqwest`.
   Not as full-featured as `objstore_s3`, which uses the official AWS SDK,
   but has way fewer dependencies.
+- [x] `objstore_github`
+  GitHub-backed object store that persists objects as files in a repository.
+  Useful for small workloads or bootstrapping environments where GitHub is already available.
 - [ ] `objstore_s3`
   Full-featured S3 backend based on the official AWS SDK.
   Supports more functionality efficiently, but has more dependencies.
@@ -30,18 +33,22 @@ Each backend is available as a separate crate.
 ## Usage
 
 ```rust
+use std::sync::Arc;
+
 use objstore::{ObjStoreBuilder, ObjStoreExt};
 
 #[tokio::main]
 async fn main() {
     let builder = ObjStoreBuilder::new()
-        .with_provider(Box::new(objstore_memory::MemoryProvider))
-        .with_provider(Box::new(objstore_fs::FsProvider))
-        .with_provider(Box::new(objstore_s3_light::S3LightProvider));
+        .with_provider(Arc::new(objstore_memory::MemoryProvider::new()))
+        .with_provider(Arc::new(objstore_fs::FsProvider::new()))
+        .with_provider(Arc::new(objstore_s3_light::S3LightProvider::new()))
+        .with_provider(Arc::new(objstore_github::GithubProvider::new()));
 
     // let uri = "memory://";
     // let uri = "fs:///tmp/my_store";
-    let uri = "s3://ACCESS_KEY:SECRET_KEY@domain.com/bucket-name?style=path";
+    // let uri = "s3://ACCESS_KEY:SECRET_KEY@domain.com/bucket-name?style=path";
+    let uri = "github://TOKEN@github.com/owner/repo?branch=main&prefix=demo";
 
     let store = builder
         .build(uri)
