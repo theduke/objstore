@@ -427,3 +427,37 @@ impl DownloadUrlArgs {
         }
     }
 }
+
+/// Arguments for generating a presigned upload URL for an object.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct UploadUrlArgs {
+    /// Object key to upload to.
+    pub key: String,
+    /// How long the URL remains valid.
+    pub valid_for: std::time::Duration,
+    /// Content-Type to set on the uploaded object.
+    pub content_type: Option<String>,
+    /// Content-Disposition header for the uploaded object.
+    pub content_disposition: Option<String>,
+    /// Content-Encoding header for the uploaded object.
+    pub content_encoding: Option<String>,
+    /// Cache-Control header for the uploaded object.
+    pub cache_control: Option<String>,
+    /// Custom metadata (e.g. x-amz-meta-* for S3).
+    pub metadata: HashMap<String, String>,
+}
+
+impl UploadUrlArgs {
+    pub fn new(key: impl Into<String>, valid_for: std::time::Duration) -> Self {
+        Self {
+            key: key.into(),
+            valid_for,
+            content_type: None,
+            content_disposition: None,
+            content_encoding: None,
+            cache_control: None,
+            metadata: HashMap::new(),
+        }
+    }
+}

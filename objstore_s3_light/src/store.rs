@@ -9,13 +9,13 @@ use rusty_s3::{Bucket, S3Action, actions::ListObjectsV2Response};
 
 use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
-use http::header::{CONTENT_TYPE, ETAG};
+use http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_TYPE, ETAG};
 use rusty_s3::actions::{CompleteMultipartUpload, CreateMultipartUpload, UploadPart};
 use time::OffsetDateTime;
 
 use objstore::{
     Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
-    Put, ValueStream,
+    Put, UploadUrlArgs, ValueStream,
 };
 
 use crate::{
@@ -203,6 +203,42 @@ impl S3ObjStore {
             .get_object(Some(&self.state.creds), &s3_key)
             .sign(args.valid_for);
 
+        Ok(url)
+    }
+
+    fn presign_upload_url(&self, args: UploadUrlArgs) -> Result<Url, anyhow::Error> {
+        let s3_key = self.build_key(&args.key);
+        let mut action = self
+            .state
+            .bucket
+            .put_object(Some(&self.state.creds), &s3_key);
+
+        if let Some(ct) = &args.content_type {
+            action
+                .headers_mut()
+                .insert(CONTENT_TYPE.to_string(), ct.clone());
+        }
+        if let Some(v) = &args.content_disposition {
+            action
+                .headers_mut()
+                .insert(CONTENT_DISPOSITION.to_string(), v.clone());
+        }
+        if let Some(v) = &args.content_encoding {
+            action
+                .headers_mut()
+                .insert(CONTENT_ENCODING.to_string(), v.clone());
+        }
+        if let Some(v) = &args.cache_control {
+            action
+                .headers_mut()
+                .insert(CACHE_CONTROL.to_string(), v.clone());
+        }
+        for (k, v) in &args.metadata {
+            let name = format!("x-amz-meta-{}", k.to_lowercase().replace('_', "-"));
+            action.headers_mut().insert(name, v.clone());
+        }
+
+        let url = action.sign(args.valid_for);
         Ok(url)
     }
 
@@ -551,6 +587,14 @@ impl ObjStore for S3ObjStore {
         args: DownloadUrlArgs,
     ) -> Result<Option<url::Url>, anyhow::Error> {
         let url = Self::generate_download_url(self, args)?;
+        Ok(Some(url))
+    }
+
+    async fn generate_upload_url(
+        &self,
+        args: UploadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        let url = Self::presign_upload_url(self, args)?;
         Ok(Some(url))
     }
 

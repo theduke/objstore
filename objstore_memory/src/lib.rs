@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 
 use objstore::{
     Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
-    Put, ValueStream,
+    Put, UploadUrlArgs, ValueStream,
 };
 use url::Url;
 
@@ -128,6 +128,13 @@ impl ObjStore for MemoryObjStore {
     async fn generate_download_url(
         &self,
         _args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        Ok(None)
+    }
+
+    async fn generate_upload_url(
+        &self,
+        _args: UploadUrlArgs,
     ) -> Result<Option<url::Url>, anyhow::Error> {
         Ok(None)
     }

@@ -2,7 +2,7 @@ use bytes::Bytes;
 
 use crate::{
     Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage, Put,
-    ValueStream,
+    UploadUrlArgs, ValueStream,
 };
 
 /// Wrapper for an object stores that logs operations with the `tracing` crate.
@@ -158,6 +158,29 @@ where
             }
             Err(e) => {
                 tracing::error!(store = &self.name, error=%e, "generate_download_url::failed");
+                Err(e)
+            }
+        }
+    }
+
+    async fn generate_upload_url(
+        &self,
+        args: UploadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        match self.inner.generate_upload_url(args).await {
+            Ok(Some(url)) => {
+                tracing::trace!(store = &self.name, %url, "generate_upload_url::ok");
+                Ok(Some(url))
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    store = &self.name,
+                    "generate_upload_url::failed - store does not support upload URLs"
+                );
+                Ok(None)
+            }
+            Err(e) => {
+                tracing::error!(store = &self.name, error=%e, "generate_upload_url::failed");
                 Err(e)
             }
         }

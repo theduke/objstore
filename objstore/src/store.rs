@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use crate::{
     Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, KeyStream, ListArgs, MetaStream,
-    ObjectMeta, ObjectMetaPage, Put, ValueStream,
+    ObjectMeta, ObjectMetaPage, Put, UploadUrlArgs, ValueStream,
 };
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 
@@ -48,6 +48,15 @@ pub trait ObjStore: Send + Sync + std::fmt::Debug {
     async fn generate_download_url(
         &self,
         args: DownloadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error>;
+
+    /// Generate a presigned upload URL for a given key.
+    ///
+    /// The client can PUT the object directly to the returned URL without sending
+    /// credentials. NOTE: Must return `Ok(None)` if the store does not support upload URLs!
+    async fn generate_upload_url(
+        &self,
+        args: UploadUrlArgs,
     ) -> Result<Option<url::Url>, anyhow::Error>;
 
     /// Store a value under a given key.
@@ -204,6 +213,13 @@ impl<K: ObjStore> ObjStore for Arc<K> {
         self.as_ref().generate_download_url(args).await
     }
 
+    async fn generate_upload_url(
+        &self,
+        args: UploadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        self.as_ref().generate_upload_url(args).await
+    }
+
     async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
         self.as_ref().send_put(put).await
     }
@@ -272,6 +288,13 @@ impl ObjStore for DynObjStore {
         args: DownloadUrlArgs,
     ) -> Result<Option<url::Url>, anyhow::Error> {
         self.as_ref().generate_download_url(args).await
+    }
+
+    async fn generate_upload_url(
+        &self,
+        args: UploadUrlArgs,
+    ) -> Result<Option<url::Url>, anyhow::Error> {
+        self.as_ref().generate_upload_url(args).await
     }
 
     async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
