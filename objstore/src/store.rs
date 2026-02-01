@@ -12,6 +12,15 @@ use futures::{StreamExt as _, TryStreamExt as _, stream};
 /// Abstraction for a generic key-value store.
 #[async_trait::async_trait]
 pub trait ObjStore: Send + Sync + std::fmt::Debug {
+
+    /// Get the store as [`std::any::Any`] for downcasting.
+    fn as_any(&self) -> &dyn std::any::Any
+    where
+        Self: Sized + 'static,
+    {
+        self
+    }
+
     /// Get a descriptive name for backend implementation.
     ///
     /// eg: "memory", "s3", ...
