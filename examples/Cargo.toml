@@ -16,6 +16,7 @@ objstore = { path = "../objstore" }
 objstore_fs = { path = "../objstore_fs" }
 objstore_memory = { path = "../objstore_memory" }
 objstore_s3_light = { path = "../objstore_s3_light" }
+objstore_github = { path = "../objstore_github" }
 
 url.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -7,11 +7,13 @@ async fn main() {
     let builder = ObjStoreBuilder::new()
         .with_provider(Arc::new(objstore_memory::MemoryProvider::new()))
         .with_provider(Arc::new(objstore_fs::FsProvider::new()))
-        .with_provider(Arc::new(objstore_s3_light::S3LightProvider::new()));
+        .with_provider(Arc::new(objstore_s3_light::S3LightProvider::new()))
+        .with_provider(Arc::new(objstore_github::GithubProvider::new()));
 
-    // let uri = "memory://";
+    let uri = "memory://";
     // let uri = "fs:///tmp/my_store";
-    let uri = "s3://ACCESS_KEY:SECRET_KEY@domain.com/bucket-name?style=path";
+    // let uri = "s3://ACCESS_KEY:SECRET_KEY@domain.com/bucket-name?style=path";
+    // let uri = "github://TOKEN@github.com/owner/repo?branch=main&prefix=objstore";
 
     let store = builder
         .build(uri)

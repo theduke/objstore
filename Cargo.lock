@@ -322,6 +322,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "objstore",
  "objstore_fs",
+ "objstore_github",
  "objstore_memory",
  "objstore_s3_light",
  "tokio",
@@ -985,6 +986,29 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "objstore_github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "futures",
+ "objstore",
+ "objstore_test",
+ "percent-encoding",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "tracing",
  "url",
 ]
 
