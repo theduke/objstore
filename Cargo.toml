@@ -40,6 +40,7 @@ objstore_fs = { path = "./objstore_fs", version = "0.1.0-alpha.1" }
 objstore_logfs = { path = "./objstore_logfs", version = "0.1.0-alpha.1" }
 objstore_memory = { path = "./objstore_memory", version = "0.1.0-alpha.1" }
 objstore_s3_light = { path = "./objstore_s3_light", version = "0.1.0-alpha.1" }
+objstore_test = { path = "./objstore_test", version = "0.1.0-alpha.1" }
 
 # External crates
 anyhow = "1"
