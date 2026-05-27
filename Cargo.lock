@@ -948,10 +948,13 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "objstore_memory",
+ "objstore_test",
  "serde",
  "serde_json",
  "serde_path_to_error",
  "time",
+ "tokio",
  "tracing",
  "url",
 ]
