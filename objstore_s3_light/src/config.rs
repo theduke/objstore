@@ -2,6 +2,10 @@ use anyhow::{Context as _, bail};
 use rusty_s3::Bucket;
 use url::Url;
 
+fn default_fetch_metadata_after_put() -> bool {
+    true
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UrlStyle {
     /// Requests will use "path-style" url: i.e:
@@ -37,6 +41,8 @@ pub struct S3ObjStoreConfig {
     pub bucket: String,
     pub region: String,
     pub path_style: UrlStyle,
+    #[serde(default = "default_fetch_metadata_after_put")]
+    pub fetch_metadata_after_put: bool,
 
     pub key: String,
     pub secret: String,
@@ -53,6 +59,7 @@ impl S3ObjStoreConfig {
     const QUERY_REGION: &'static str = "region";
     const QUERY_PREFIX: &'static str = "prefix";
     const QUERY_TOKEN: &'static str = "token";
+    const QUERY_FETCH_METADATA_AFTER_PUT: &'static str = "fetch_metadata_after_put";
 
     pub fn validate(&self) -> Result<(), anyhow::Error> {
         if !(self.url.scheme() == "http" || self.url.scheme() == "https") {
@@ -94,6 +101,9 @@ impl S3ObjStoreConfig {
                 },
             );
             pairs.append_pair(Self::QUERY_REGION, &self.region);
+            if !self.fetch_metadata_after_put {
+                pairs.append_pair(Self::QUERY_FETCH_METADATA_AFTER_PUT, "false");
+            }
             if let Some(prefix) = &self.path_prefix {
                 pairs.append_pair(Self::QUERY_PREFIX, prefix);
             }
@@ -201,6 +211,20 @@ impl S3ObjStoreConfig {
             raw.map(|prefix| prefix.to_string())
         };
 
+        let fetch_metadata_after_put = query_pairs
+            .iter()
+            .find(|(k, _)| k == Self::QUERY_FETCH_METADATA_AFTER_PUT)
+            .map(|(_, v)| match v.as_ref() {
+                "true" | "1" => Ok(true),
+                "false" | "0" => Ok(false),
+                other => Err(anyhow::anyhow!(
+                    "invalid fetch_metadata_after_put: expected true/false, got '{}'",
+                    other
+                )),
+            })
+            .transpose()?
+            .unwrap_or(true);
+
         let region = region.unwrap_or_else(|| "auto".to_string());
 
         let insecure = query_pairs.iter().any(|(k, _)| k == "insecure");
@@ -226,6 +250,7 @@ impl S3ObjStoreConfig {
             bucket,
             region,
             path_style,
+            fetch_metadata_after_put,
             key,
             secret,
             token: None,
@@ -254,12 +279,37 @@ mod tests {
                     bucket: "bucket".to_string(),
                     region: "auto".to_string(),
                     path_style: UrlStyle::Path,
+                    fetch_metadata_after_put: true,
                     key: "user".to_string(),
                     secret: "pw".to_string(),
                     token: None,
                     path_prefix: None,
                 }
             );
+        }
+
+        {
+            let uri2 = "s3://user:pw@host:9000/bucket?style=path&fetch_metadata_after_put=false";
+            let config2 = S3ObjStoreConfig::from_uri(uri2).unwrap();
+            assert_eq!(config2.fetch_metadata_after_put, false);
+
+            let uri2_roundtrip = config2.build_uri().unwrap();
+            assert!(uri2_roundtrip.contains("fetch_metadata_after_put=false"));
+        }
+
+        {
+            let json = r#"{
+                "url":"https://host:9000",
+                "bucket":"bucket",
+                "region":"auto",
+                "path_style":"Path",
+                "key":"user",
+                "secret":"pw",
+                "token":null,
+                "path_prefix":null
+            }"#;
+            let config: S3ObjStoreConfig = serde_json::from_str(json).unwrap();
+            assert!(config.fetch_metadata_after_put);
         }
     }
 }

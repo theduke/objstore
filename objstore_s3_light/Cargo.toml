@@ -39,3 +39,4 @@ jiff = "0.2.15"
 objstore_test = { path = "../objstore_test" }
 pretty_assertions.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json.workspace = true

@@ -35,6 +35,7 @@ struct State {
     creds: rusty_s3::Credentials,
     bucket: Bucket,
     path_prefix: Option<String>,
+    fetch_metadata_after_put: bool,
     client: Client,
 }
 
@@ -89,6 +90,7 @@ impl S3ObjStore {
                 creds: config.build_credentials(),
                 bucket: config.build_bucket()?,
                 path_prefix,
+                fetch_metadata_after_put: config.fetch_metadata_after_put,
                 client,
             }),
         })
@@ -272,6 +274,13 @@ impl S3ObjStore {
 
         let res = self.state.client.put(url).body(body).send().await?;
         let res = Self::error_for_status(res).await?;
+        if self.state.fetch_metadata_after_put {
+            return self
+                .head_object(&put.key)
+                .await?
+                .context("failed to fetch object metadata after put");
+        }
+
         let meta = parse_object_headers(put.key, res.headers())?;
         Ok(meta)
     }
