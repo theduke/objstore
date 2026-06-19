@@ -151,7 +151,7 @@ impl LogFsObjStoreConfig {
         let file_str = url
             .as_str()
             .strip_prefix(&prefix)
-            .map(|rest| format!("file:{}", rest))
+            .map(|rest| format!("file:{rest}"))
             .ok_or_else(|| anyhow!("invalid logfs url: expected '{}' prefix", prefix))?;
         let file_url = Url::parse(&file_str)
             .map_err(|err| anyhow!("failed to parse translated file url: {err}"))?;
@@ -172,25 +172,25 @@ impl LogFsObjStoreConfig {
                     config.offset = Some(
                         value
                             .parse::<u64>()
-                            .with_context(|| format!("invalid offset '{}': expected u64", value))?,
+                            .with_context(|| format!("invalid offset '{value}': expected u64"))?,
                     )
                 }
                 "chunk_size" | "default_chunk_size" => {
                     config.default_chunk_size =
                         Some(value.parse::<u32>().with_context(|| {
-                            format!("invalid chunk size '{}': expected u32", value)
+                            format!("invalid chunk size '{value}': expected u32")
                         })?)
                 }
                 "partial_index_interval" => {
                     config.partial_index_write_interval =
                         Some(value.parse::<u64>().with_context(|| {
-                            format!("invalid partial index interval '{}': expected u64", value)
+                            format!("invalid partial index interval '{value}': expected u64")
                         })?)
                 }
                 "full_index_interval" => {
                     config.full_index_write_interval =
                         Some(value.parse::<u64>().with_context(|| {
-                            format!("invalid full index interval '{}': expected u64", value)
+                            format!("invalid full index interval '{value}': expected u64")
                         })?)
                 }
                 "crypto_key" => {
@@ -199,13 +199,13 @@ impl LogFsObjStoreConfig {
                 "crypto_salt_b64" | "crypto_salt" => {
                     let engine = base64::engine::general_purpose::STANDARD;
                     let decoded = engine.decode(value.as_ref()).with_context(|| {
-                        format!("invalid base64 salt '{}': expected valid base64", value)
+                        format!("invalid base64 salt '{value}': expected valid base64")
                     })?;
                     crypto_salt = Some(decoded);
                 }
                 "crypto_iterations" => {
                     let parsed = value.parse::<u32>().with_context(|| {
-                        format!("invalid crypto iterations '{}': expected u32", value)
+                        format!("invalid crypto iterations '{value}': expected u32")
                     })?;
                     crypto_iterations = Some(NonZeroU32::new(parsed).ok_or_else(|| {
                         anyhow!("crypto iterations must be non-zero: '{}'", value)
