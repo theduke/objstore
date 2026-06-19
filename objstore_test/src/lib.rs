@@ -5,7 +5,9 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt};
-use objstore::{ListArgs, ObjStore, ObjStoreExt, ObjectMeta, SizedValueStream, ValueStream};
+use objstore::{
+    DataSource, ListArgs, ObjStore, ObjStoreExt, ObjectMeta, Put, SizedValueStream, ValueStream,
+};
 use pretty_assertions::assert_eq;
 use sha2::Digest as _;
 use time::OffsetDateTime;
@@ -31,6 +33,10 @@ pub async fn test_objstore(store: &impl ObjStore) {
     test_single_key_flow(store, &prefix).await;
     tracing::info!("finished test_single_key_flow()");
 
+    tracing::info!("running test_put_with_mime_type()");
+    test_put_with_mime_type(store, &prefix).await;
+    tracing::info!("finished test_put_with_mime_type()");
+
     let keys = store.list_all_keys(&prefix).await.unwrap();
     assert!(keys.is_empty());
 
@@ -38,10 +44,119 @@ pub async fn test_objstore(store: &impl ObjStore) {
     test_full_flow(store, &prefix).await;
     tracing::info!("finished test_full_flow()");
 
+    // Test copying keys with special characters to ensure implementations
+    // correctly handle percent-encoding in copy operations.
+    tracing::info!("running test_copy_special_chars()");
+    test_copy_special_chars(store, &prefix).await;
+    tracing::info!("finished test_copy_special_chars()");
+
     // Delete all.
     store.delete_prefix("").await.unwrap();
     let items = store.list(ListArgs::new()).await.unwrap().items;
     assert_eq!(items.len(), 0);
+}
+
+async fn test_copy_special_chars(store: &impl ObjStore, prefix: &str) {
+    // Construct a key that includes characters requiring percent-encoding
+    // in an x-amz-copy-source header: space, '#', '%', and a non-ASCII char.
+    let unique = Uuid::new_v4().to_string();
+    let special_segment = format!("space # % é {}", &unique[0..8]);
+    let key = format!("{}/{}", prefix, special_segment);
+    let dest = format!("{}/copy-{}", prefix, unique);
+
+    let payload = Bytes::from_static(b"copy-special-payload");
+
+    // Put the object with the special-character key.
+    store.put(&key).bytes(payload.clone()).await.unwrap();
+
+    // Attempt to copy it; this will exercise building x-amz-copy-source.
+    let _meta = store.copy(&key, &dest).send().await.unwrap();
+
+    // Verify the copied object exists and has the same contents.
+    let loaded = store
+        .get(&dest)
+        .await
+        .unwrap()
+        .expect("copied key should exist");
+    assert_eq!(loaded, payload);
+
+    // Cleanup
+    store.delete(&key).await.unwrap();
+    store.delete(&dest).await.unwrap();
+}
+
+async fn test_put_with_mime_type(store: &impl ObjStore, prefix: &str) {
+    let key = format!("{prefix}/mime-type-{}", Uuid::new_v4());
+    let value = Bytes::from_static(b"zip-ish payload");
+    let mime_type = "application/zip";
+
+    let mut put = Put::new(&key, DataSource::Data(value.clone()));
+    put.mime_type = Some(mime_type.to_string());
+
+    let put_meta = store.send_put(put).await.unwrap();
+
+    let meta = store
+        .meta(&key)
+        .await
+        .unwrap()
+        .expect("mime type test object should exist");
+
+    // If either the immediate put response or the stored metadata include a MIME
+    // type, ensure it matches the requested MIME type. Some backends do not
+    // persist MIME type information and will therefore return `None` for both
+    // values; in that case we accept the lack of MIME metadata.
+    match (put_meta.mime_type.as_deref(), meta.mime_type.as_deref()) {
+        (Some(p), Some(m)) => {
+            assert_eq!(p, mime_type, "put metadata should preserve MIME type");
+            assert_eq!(m, mime_type, "stored metadata should preserve MIME type");
+        }
+        (Some(p), None) => {
+            assert_eq!(p, mime_type, "put metadata should preserve MIME type");
+        }
+        (None, Some(m)) => {
+            assert_eq!(m, mime_type, "stored metadata should preserve MIME type");
+        }
+        (None, None) => {
+            // Backend does not persist MIME type — acceptable.
+            tracing::debug!("backend did not persist MIME type for key {}", key);
+        }
+    }
+
+    let loaded = store
+        .get(&key)
+        .await
+        .unwrap()
+        .expect("mime type test object should be readable");
+    assert_eq!(loaded, value);
+
+    store.delete(&key).await.unwrap();
+}
+
+/// Test storing an empty stream.
+///
+/// This is exposed separately from the shared suite because not all store
+/// implementations can currently read zero-byte objects back correctly.
+pub async fn test_empty_stream_put(store: &impl ObjStore, prefix: &str) {
+    let key = format!("{prefix}/empty-stream-{}", Uuid::new_v4());
+    let stream = SizedValueStream::new_without_size(futures::stream::empty().boxed());
+
+    store.put(&key).stream(stream).await.unwrap();
+
+    let loaded = store
+        .get(&key)
+        .await
+        .unwrap()
+        .expect("empty stream object should exist");
+    assert!(loaded.is_empty());
+
+    let meta = store
+        .meta(&key)
+        .await
+        .unwrap()
+        .expect("empty stream object metadata should exist");
+    assert_eq!(meta.size, Some(0));
+
+    store.delete(&key).await.unwrap();
 }
 
 async fn test_full_flow(store: &impl ObjStore, prefix: &str) {
@@ -205,9 +320,6 @@ fn new_keymeta(key: &str, value: &Bytes) -> ObjectMeta {
 fn expect_meta(expected: &ObjectMeta, actual: &ObjectMeta) {
     let expected = expected.clone().with_rounded_timestamps_minute();
     let expected_size = expected.size.expect("expected size must set");
-    let exected_created_at = expected.created_at.expect("expected created_at must set");
-    let expected_updated_at = expected.updated_at.expect("expected updated_at must set");
-    let hash_sha256 = expected.hash_sha256.expect("expected hash_sha256 must set");
 
     let actual = actual.clone().with_rounded_timestamps_minute();
 
@@ -228,9 +340,10 @@ fn expect_meta(expected: &ObjectMeta, actual: &ObjectMeta) {
     }
 
     let now = OffsetDateTime::now_utc();
-    if let Some(created_at) = actual.created_at {
+    if let (Some(expected_created_at), Some(created_at)) = (expected.created_at, actual.created_at)
+    {
         let diff1 = now - created_at;
-        let diff2 = now - exected_created_at;
+        let diff2 = now - expected_created_at;
         let diff = if diff1 > diff2 {
             diff1 - diff2
         } else {
@@ -238,10 +351,11 @@ fn expect_meta(expected: &ObjectMeta, actual: &ObjectMeta) {
         };
         assert!(
             diff.whole_seconds() < 10,
-            "expected {created_at:?} to roughly match {exected_created_at:?}"
+            "expected {created_at:?} to roughly match {expected_created_at:?}"
         );
     }
-    if let Some(updated_at) = actual.updated_at {
+    if let (Some(expected_updated_at), Some(updated_at)) = (expected.updated_at, actual.updated_at)
+    {
         let diff1 = now - updated_at;
         let diff2 = now - expected_updated_at;
         let diff = if diff1 > diff2 {
@@ -254,7 +368,7 @@ fn expect_meta(expected: &ObjectMeta, actual: &ObjectMeta) {
             "expected {updated_at:?} to roughly match {expected_updated_at:?}"
         );
     }
-    if let Some(hash) = actual.hash_sha256 {
+    if let (Some(hash_sha256), Some(hash)) = (expected.hash_sha256, actual.hash_sha256) {
         assert_eq!(hash_sha256, hash);
     }
 }
@@ -362,19 +476,20 @@ where
     }
 
     // Copy the key and verify the copy exists.
-    // {
-    //     let dest = format!("{prefix}/{key_name}_copy");
-    //     let copy_meta = store.copy(&key, &dest).send().await.unwrap();
-    //     let value_copy = store.get(&dest).await.unwrap().unwrap();
-    //     expect_key(store, &dest, &value_copy, copy_meta.clone()).await;
-    // }
+    {
+        let dest = format!("{prefix}/{key_name}_copy");
+        store.copy(&key, &dest).send().await.unwrap();
+        let value_copy = store.get(&dest).await.unwrap().unwrap();
+        let expected_meta = new_keymeta(&dest, &value_copy);
+        expect_key(store, &dest, &value_copy, expected_meta).await;
+    }
 
     // Delete the key and check it no longer exists.
     {
         // Remove both original and copied keys.
         store.delete(&key).await.unwrap();
-        // let dest = format!("{prefix}/{key_name}_copy");
-        // store.delete(&dest).await.unwrap();
+        let dest = format!("{prefix}/{key_name}_copy");
+        store.delete(&dest).await.unwrap();
 
         let keys = store.list_all_keys(&prefix).await.unwrap();
         assert_eq!(

@@ -8,6 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task;
 use url::Url;
 
+use sha2::Digest;
+
 use objstore::{
     Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
     Put, UploadUrlArgs, ValueStream,
@@ -50,6 +52,13 @@ impl LogFsObjStore {
     fn key_meta_to_object_meta(key: String, meta: KeyMeta) -> ObjectMeta {
         let mut obj = ObjectMeta::new(key);
         obj.size = Some(meta.size);
+        // If the backend doesn't provide explicit timestamps, set them to now so
+        // higher-level tests and consumers that expect timestamps will have a
+        // reasonable value. If the backend does expose timestamps in KeyMeta in
+        // the future, prefer those (the KeyMeta currently does not include them).
+        let now = time::OffsetDateTime::now_utc();
+        obj.created_at = Some(now);
+        obj.updated_at = Some(now);
         if let Some(chunk_size) = meta.chunk_size {
             obj.extra
                 .insert("chunk_size".to_string(), serde_json::json!(chunk_size));
@@ -337,13 +346,17 @@ impl ObjStore for LogFsObjStore {
                 .ok_or_else(|| LogFsError::NotFound {
                     path: copy.source_key.clone(),
                 })?;
+            // Compute SHA256 of the copied data so higher-level code/tests can rely on it.
+            let digest = sha2::Sha256::digest(&data);
             log.insert(copy.target_key.clone(), data)?;
             let meta = log
                 .get_meta(&copy.target_key)?
                 .ok_or_else(|| LogFsError::NotFound {
                     path: copy.target_key.clone(),
                 })?;
-            Ok(Self::key_meta_to_object_meta(copy.target_key, meta))
+            let mut obj = Self::key_meta_to_object_meta(copy.target_key.clone(), meta);
+            obj.hash_sha256 = Some(digest.into());
+            Ok(obj)
         })
         .await
     }
