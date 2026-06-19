@@ -54,6 +54,8 @@ jobs:
 
     - name: Test minio with s3-light
       if: runner.os == 'Linux'
+      env:
+        TEST_STRICT: "1"
       run: make test-minio-s3-light
       
   msrv:
