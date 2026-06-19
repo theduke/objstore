@@ -323,7 +323,7 @@ impl Conditions {
     }
 
     pub fn if_not_exists(mut self) -> Self {
-        self.if_match = Some(MatchValue::Any);
+        self.if_none_match = Some(MatchValue::Any);
         self
     }
 
@@ -357,7 +357,7 @@ impl Conditions {
         for tag in tags {
             let tag = tag.into();
             if tag == "*" {
-                self.if_match = Some(MatchValue::Any);
+                self.if_none_match = Some(MatchValue::Any);
                 return self;
             }
             if tag.trim().is_empty() {
@@ -394,8 +394,7 @@ impl Conditions {
             tags.retain(|tag| !tag.trim().is_empty());
             let has_any = tags.iter().any(|tag| tag == "*");
             if has_any {
-                self.if_match = Some(MatchValue::Any);
-                self.if_none_match = None;
+                self.if_none_match = Some(MatchValue::Any);
             } else if !tags.is_empty() {
                 self.if_none_match = Some(MatchValue::Tags(tags.clone()));
             } else {
@@ -510,5 +509,41 @@ impl UploadUrlArgs {
             cache_control: None,
             metadata: HashMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Conditions, MatchValue};
+
+    #[test]
+    fn if_not_exists_sets_if_none_match_any() {
+        let conditions = Conditions::new().if_not_exists();
+
+        assert_eq!(conditions.if_match, None);
+        assert_eq!(conditions.if_none_match, Some(MatchValue::Any));
+    }
+
+    #[test]
+    fn if_none_match_star_sets_if_none_match_any() {
+        let conditions = Conditions::new().if_none_match_tags(["*"]);
+
+        assert_eq!(conditions.if_match, None);
+        assert_eq!(conditions.if_none_match, Some(MatchValue::Any));
+    }
+
+    #[test]
+    fn sanitize_preserves_if_none_match_any_for_star_tag() {
+        let mut conditions = Conditions {
+            if_match: None,
+            if_none_match: Some(MatchValue::Tags(vec!["*".to_string()])),
+            if_modified_since: None,
+            if_unmodified_since: None,
+        };
+
+        conditions.sanitize();
+
+        assert_eq!(conditions.if_match, None);
+        assert_eq!(conditions.if_none_match, Some(MatchValue::Any));
     }
 }
