@@ -66,15 +66,13 @@
 
           buildInputs = with pkgs; [
             pkg-config
-
-
           ];
           propagatedBuildInputs = with pkgs; [];
           # runtimeDependencies = runtimeDeps;
           buildPhase = "";
           installPhase = "";
 
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath nativeBuildInputs;
+          # LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath nativeBuildInputs;
           
           # Allow `cargo run` etc to find ssl lib.
           # LD_LIBRARY_PATH = "${pkgs.openssl.out}/lib:${pkgs.gtk3}/lib:${pkgs.webkitgtk}/lib:${pkgs.glib.out}/lib:${pkgs.stdenv.cc.cc.lib}/lib64:${pkgs.glib-networking}/lib";
