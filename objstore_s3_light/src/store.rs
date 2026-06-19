@@ -4,11 +4,12 @@ use anyhow::Context;
 use bytes::Bytes;
 use futures::TryStreamExt as _;
 use http::StatusCode;
-use reqwest::{Client, Url};
-use rusty_s3::{Bucket, S3Action, actions::ListObjectsV2Response};
+use reqwest::{Client, RequestBuilder, Url};
+use rusty_s3::{Bucket, Map, S3Action, actions::ListObjectsV2Response};
 
 use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
+use http::header::CONTENT_LENGTH;
 use http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_TYPE, ETAG};
 use rusty_s3::actions::{CompleteMultipartUpload, CreateMultipartUpload, UploadPart};
 use time::OffsetDateTime;
@@ -118,6 +119,13 @@ impl S3ObjStore {
             }
             None => Cow::Borrowed(key),
         }
+    }
+
+    fn with_signed_headers(mut req: RequestBuilder, headers: &Map<'_>) -> RequestBuilder {
+        for (key, value) in headers.iter() {
+            req = req.header(key, value);
+        }
+        req
     }
 
     fn prune_key_prefix(&self, key: String) -> String {
@@ -252,8 +260,15 @@ impl S3ObjStore {
 
         let data = match data {
             DataSource::Data(bytes) => bytes,
-            DataSource::Stream(stream) => {
-                return self.multipart_upload(put, stream).await;
+            DataSource::Stream(sized) => {
+                // Use a single PUT with Content-Length when the stream length is known
+                // and fits in one part, otherwise fall back to multipart upload.
+                if let Some(size) = sized.size()
+                    && size <= Self::PART_SIZE as u64
+                {
+                    return self.single_put_stream(put, sized.into_stream(), size).await;
+                }
+                return self.multipart_upload(put, sized.into_stream()).await;
             }
         };
 
@@ -268,11 +283,54 @@ impl S3ObjStore {
         if let Some(ct) = &put.mime_type {
             action.headers_mut().insert(CONTENT_TYPE.to_string(), ct);
         }
+        let headers = action.headers_mut().clone();
         let url = action.sign(Self::DURATION);
 
         let body = data;
 
-        let res = self.state.client.put(url).body(body).send().await?;
+        let res = Self::with_signed_headers(self.state.client.put(url), &headers)
+            .body(body)
+            .send()
+            .await?;
+        let res = Self::error_for_status(res).await?;
+        if self.state.fetch_metadata_after_put {
+            return self
+                .head_object(&put.key)
+                .await?
+                .context("failed to fetch object metadata after put");
+        }
+
+        let meta = parse_object_headers(put.key, res.headers())?;
+        Ok(meta)
+    }
+
+    async fn single_put_stream(
+        &self,
+        put: Put,
+        stream: ValueStream,
+        size: u64,
+    ) -> Result<ObjectMeta, anyhow::Error> {
+        let s3_key = self.build_key(&put.key);
+        let mut action = self
+            .state
+            .bucket
+            .put_object(Some(&self.state.creds), &s3_key);
+        apply_condition_headers(action.headers_mut(), put.conditions)?;
+        if let Some(ct) = &put.mime_type {
+            action.headers_mut().insert(CONTENT_TYPE.to_string(), ct);
+        }
+        action
+            .headers_mut()
+            .insert(CONTENT_LENGTH.to_string(), size.to_string());
+        let headers = action.headers_mut().clone();
+        let url = action.sign(Self::DURATION);
+
+        let body = reqwest::Body::wrap_stream(stream.map(|r| r.map_err(std::io::Error::other)));
+
+        let res = Self::with_signed_headers(self.state.client.put(url), &headers)
+            .body(body)
+            .send()
+            .await?;
         let res = Self::error_for_status(res).await?;
         if self.state.fetch_metadata_after_put {
             return self
@@ -301,8 +359,11 @@ impl S3ObjStore {
         if let Some(ct) = &put.mime_type {
             create.headers_mut().insert(CONTENT_TYPE.to_string(), ct);
         }
+        let headers = create.headers_mut().clone();
         let url = create.sign(Self::DURATION);
-        let resp = self.state.client.post(url).send().await?;
+        let resp = Self::with_signed_headers(self.state.client.post(url), &headers)
+            .send()
+            .await?;
         let resp = Self::error_for_status(resp).await?;
         let body = resp
             .text()
@@ -627,9 +688,12 @@ impl ObjStore for S3ObjStore {
         apply_condition_headers(b.headers_mut(), copy.conditions)?;
 
         // FIXME: add conditions
+        let headers = b.headers_mut().clone();
         let url = b.sign(Self::DURATION);
 
-        let res = self.state.client.put(url).send().await?;
+        let res = Self::with_signed_headers(self.state.client.put(url), &headers)
+            .send()
+            .await?;
         let res = Self::error_for_status(res).await?;
 
         let meta = parse_object_headers(copy.target_key, res.headers())?;
@@ -787,5 +851,78 @@ mod tests {
         };
         let store = S3ObjStore::new(config).expect("failed to create s3 kv store");
         objstore_test::test_objstore(&store).await;
+    }
+
+    /// Regression test for the header-handling fix: a sized stream upload that
+    /// fits in a single part must take the single-PUT path and actually send
+    /// the signed `Content-Type` and `Content-Length` headers to S3.
+    ///
+    /// Before the fix the headers were added to the signed action but never
+    /// copied onto the outgoing request, so S3 never saw the MIME type and
+    /// stream uploads always fell back to multipart.
+    #[tokio::test]
+    async fn test_s3_single_put_stream_headers() {
+        use objstore::SizedValueStream;
+
+        let config = if let Some(config) = load_test_config().unwrap() {
+            config
+        } else {
+            return;
+        };
+
+        // No prefix: keeps the key predictable for cleanup.
+        let config = S3ObjStoreConfig {
+            path_prefix: None,
+            ..config
+        };
+        let store = S3ObjStore::new(config).expect("failed to create s3 kv store");
+
+        // Unique key derived from the current time to avoid collisions across runs.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let key = format!("regression-single-put-stream-{nanos}");
+
+        // Small payload well below PART_SIZE (8 MiB) to force the single-PUT path.
+        let value: Bytes = Bytes::from(format!("{{\"id\":{nanos},\"msg\":\"sized-stream-put\"}}"));
+        let len = value.len() as u64;
+        let mime = "application/json".to_string();
+
+        let stream: ValueStream =
+            futures::stream::once(std::future::ready(Ok(value.clone()))).boxed();
+
+        let mut put = Put::new(&key, DataSource::Stream(SizedValueStream::new(stream, len)));
+        put.mime_type = Some(mime.clone());
+        store
+            .send_put(put)
+            .await
+            .expect("single PUT stream upload should succeed");
+
+        let (got, meta) = store
+            .get_with_meta(&key)
+            .await
+            .expect("get_with_meta should not error")
+            .expect("uploaded object should exist");
+
+        assert_eq!(
+            got, value,
+            "retrieved value should match the uploaded payload"
+        );
+        assert_eq!(
+            meta.size,
+            Some(len),
+            "Content-Length should have been sent and honored on the single PUT"
+        );
+        assert_eq!(
+            meta.mime_type,
+            Some(mime),
+            "signed Content-Type header should have reached S3"
+        );
+
+        store
+            .delete(&key)
+            .await
+            .expect("failed to clean up test object");
     }
 }

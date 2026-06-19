@@ -144,8 +144,8 @@ impl ObjStore for MemoryObjStore {
 
         let value = match put.data {
             DataSource::Data(bytes) => bytes,
-            DataSource::Stream(stream) => {
-                let data = stream.try_collect::<BytesMut>().await?;
+            DataSource::Stream(sized) => {
+                let data = sized.into_stream().try_collect::<BytesMut>().await?;
                 data.freeze()
             }
         };

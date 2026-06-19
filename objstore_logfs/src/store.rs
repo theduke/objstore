@@ -293,7 +293,8 @@ impl ObjStore for LogFsObjStore {
                 })
                 .await
             }
-            DataSource::Stream(mut stream) => {
+            DataSource::Stream(sized) => {
+                let mut stream = sized.into_stream();
                 let log = self.state.log.clone();
                 let key_clone = key.clone();
                 let (tx, rx) = mpsc::channel::<Bytes>(8);

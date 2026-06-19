@@ -5,9 +5,9 @@ use bytes::Bytes;
 
 use crate::{
     Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, KeyStream, ListArgs, MetaStream,
-    ObjectMeta, ObjectMetaPage, Put, UploadUrlArgs, ValueStream,
+    ObjectMeta, ObjectMetaPage, Put, SizedValueStream, UploadUrlArgs, ValueStream,
 };
-use futures::{StreamExt as _, TryStreamExt as _, stream};
+use futures::{TryStreamExt as _, stream};
 
 /// Abstraction for a generic key-value store.
 #[async_trait::async_trait]
@@ -387,20 +387,7 @@ where
         self.send(DataSource::Data(data.into())).await
     }
 
-    pub async fn stream<D, E>(
-        self,
-        stream: impl futures::Stream<Item = Result<D, E>> + Send + 'static,
-    ) -> Result<ObjectMeta, anyhow::Error>
-    where
-        Bytes: From<D>,
-        anyhow::Error: From<E>,
-        E: Send + 'static,
-    {
-        let stream: ValueStream = stream
-            .map_ok(|item: D| Bytes::from(item))
-            .map_err(anyhow::Error::from)
-            .boxed();
-
+    pub async fn stream(self, stream: SizedValueStream) -> Result<ObjectMeta, anyhow::Error> {
         self.send(DataSource::Stream(stream)).await
     }
 }
