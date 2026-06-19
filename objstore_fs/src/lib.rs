@@ -301,7 +301,8 @@ impl ObjStore for FsObjStore {
             DataSource::Data(value) => {
                 tokio::fs::write(&path, &value).await?;
             }
-            DataSource::Stream(mut stream) => {
+            DataSource::Stream(sized) => {
+                let mut stream = sized.into_stream();
                 let mut file = tokio::fs::File::create(&path).await?;
 
                 while let Some(chunk) = stream.next().await {

@@ -5,7 +5,7 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt};
-use objstore::{ListArgs, ObjStore, ObjStoreExt, ObjectMeta, ValueStream};
+use objstore::{ListArgs, ObjStore, ObjStoreExt, ObjectMeta, SizedValueStream, ValueStream};
 use pretty_assertions::assert_eq;
 use sha2::Digest as _;
 use time::OffsetDateTime;
@@ -396,9 +396,14 @@ where
     // Do the same again with stream put/get.
     {
         let value: Bytes = format!("{}_sync", Uuid::new_v4()).into();
+        let len = value.len() as u64;
         let stream: ValueStream =
             futures::stream::once(std::future::ready(Ok(value.clone()))).boxed();
-        store.put(&key).stream(stream).await.unwrap();
+        store
+            .put(&key)
+            .stream(SizedValueStream::new(stream, len))
+            .await
+            .unwrap();
 
         expect_key(store, &key, &value, new_keymeta(&key, &value)).await;
 

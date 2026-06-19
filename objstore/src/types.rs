@@ -6,6 +6,57 @@ use time::OffsetDateTime;
 /// Byte stream.
 pub type ValueStream = futures::stream::BoxStream<'static, Result<Bytes, anyhow::Error>>;
 
+/// A byte stream with an optional known length.
+///
+/// Use [`SizedValueStream::new`] when the stream length is known,
+/// or [`SizedValueStream::new_without_size`] when it is not.
+///
+/// Many backends (e.g. S3) require the content length for
+/// single-PUT uploads and will fall back to multipart upload or
+/// another less efficient mechanism when the size is unknown.
+pub struct SizedValueStream {
+    stream: ValueStream,
+    size: Option<u64>,
+}
+
+impl SizedValueStream {
+    /// Create a new sized value stream with a known length.
+    pub fn new(stream: ValueStream, size: u64) -> Self {
+        Self {
+            stream,
+            size: Some(size),
+        }
+    }
+
+    /// Create a sized value stream without a known size.
+    ///
+    /// WARNING: Many backends, such as S3, require a content length
+    /// for efficient single-PUT uploads. Without a size, the backend
+    /// may fall back to multipart upload or another less efficient
+    /// mechanism. Prefer providing a size when possible.
+    pub fn new_without_size(stream: ValueStream) -> Self {
+        Self { stream, size: None }
+    }
+
+    /// The known stream length, if available.
+    pub fn size(&self) -> Option<u64> {
+        self.size
+    }
+
+    /// Consume the wrapper and return the inner byte stream.
+    pub fn into_stream(self) -> ValueStream {
+        self.stream
+    }
+}
+
+impl std::fmt::Debug for SizedValueStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SizedValueStream")
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
 /// Stream of key-name pages (as returned by `list_keys`).
 pub type KeyStream<'a> = futures::stream::BoxStream<'a, Result<KeyPage, anyhow::Error>>;
 
@@ -188,14 +239,14 @@ impl ListArgs {
 
 pub enum DataSource {
     Data(Bytes),
-    Stream(ValueStream),
+    Stream(SizedValueStream),
 }
 
 impl std::fmt::Debug for DataSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Data(_) => f.write_str("DataSource::Data(...)"),
-            Self::Stream(_) => f.write_str("DataSource::Stream(...)"),
+            Self::Stream(v) => f.debug_tuple("Stream").field(&v.size()).finish(),
         }
     }
 }
@@ -206,8 +257,8 @@ impl From<Bytes> for DataSource {
     }
 }
 
-impl From<ValueStream> for DataSource {
-    fn from(stream: ValueStream) -> Self {
+impl From<SizedValueStream> for DataSource {
+    fn from(stream: SizedValueStream) -> Self {
         Self::Stream(stream)
     }
 }
