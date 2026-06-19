@@ -11,17 +11,23 @@ use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
 use http::header::CONTENT_LENGTH;
 use http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_TYPE, ETAG};
-use rusty_s3::actions::{CompleteMultipartUpload, CreateMultipartUpload, UploadPart};
+use rusty_s3::actions::{
+    AbortMultipartUpload, CompleteMultipartUpload, CreateMultipartUpload, UploadPart,
+};
 use time::OffsetDateTime;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
-    Put, UploadUrlArgs, ValueStream,
+    Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta,
+    ObjectMetaPage, Put, UploadUrlArgs, ValueStream,
 };
 
 use crate::{
     S3ObjStoreConfig,
-    util::{apply_condition_headers, parse_object_headers},
+    util::{
+        apply_condition_headers, apply_copy_source_condition_headers,
+        error_from_success_response_body, insert_signed_header, parse_copy_object_result,
+        parse_object_headers,
+    },
 };
 
 /// A lightweight S3-compatible object store.
@@ -38,6 +44,14 @@ struct State {
     path_prefix: Option<String>,
     fetch_metadata_after_put: bool,
     client: Client,
+}
+
+struct MultipartUploadState {
+    key: String,
+    s3_key: String,
+    upload_id: String,
+    conditions: Conditions,
+    mime_type: Option<String>,
 }
 
 impl S3ObjStore {
@@ -65,7 +79,7 @@ impl S3ObjStore {
         client: Client,
     ) -> Result<Self, anyhow::Error> {
         let path_prefix = if let Some(prefix) = &config.path_prefix {
-            let prefix = prefix.trim_end_matches('/');
+            let prefix = prefix.trim_matches('/');
             if prefix.is_empty() {
                 None
             } else {
@@ -138,6 +152,25 @@ impl S3ObjStore {
         }
     }
 
+    fn normalize_list_response(&self, data: &mut ListObjectsV2Response) {
+        for content in &mut data.contents {
+            if let Ok(key) = percent_encoding::percent_decode_str(&content.key).decode_utf8() {
+                content.key = key.into_owned();
+            }
+
+            let key = std::mem::take(&mut content.key);
+            content.key = self.prune_key_prefix(key);
+        }
+        for prefix in &mut data.common_prefixes {
+            if let Ok(value) = percent_encoding::percent_decode_str(&prefix.prefix).decode_utf8() {
+                prefix.prefix = value.into_owned();
+            }
+
+            let value = std::mem::take(&mut prefix.prefix);
+            prefix.prefix = self.prune_key_prefix(value);
+        }
+    }
+
     async fn error_for_status(res: reqwest::Response) -> Result<reqwest::Response, anyhow::Error> {
         if res.status().is_success() {
             Ok(res)
@@ -145,6 +178,47 @@ impl S3ObjStore {
             let status = res.status();
             let body = res.text().await.context("failed to read response body")?;
             Err(anyhow::anyhow!("S3 request failed: {}: {}", status, body))
+        }
+    }
+
+    async fn ensure_bucket_exists(&self) -> Result<(), anyhow::Error> {
+        let action = self.state.bucket.head_bucket(Some(&self.state.creds));
+        let url = action.sign(Self::DURATION);
+
+        let res = self.state.client.head(url).send().await?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Err(anyhow::anyhow!(
+                "S3 bucket does not exist: {}",
+                self.state.bucket.name()
+            ));
+        }
+        Self::error_for_status(res).await?;
+        Ok(())
+    }
+
+    fn etag_from_headers(headers: &http::HeaderMap) -> Result<Option<String>, anyhow::Error> {
+        headers
+            .get(ETAG)
+            .map(|v| {
+                Ok(v.to_str()
+                    .context("invalid etag header")?
+                    .trim_matches('"')
+                    .trim()
+                    .to_string())
+            })
+            .transpose()
+    }
+
+    async fn metadata_after_write(
+        &self,
+        key: &str,
+        fallback: ObjectMeta,
+        context: &'static str,
+    ) -> Result<ObjectMeta, anyhow::Error> {
+        if self.state.fetch_metadata_after_put {
+            self.head_object(key).await?.context(context)
+        } else {
+            Ok(fallback)
         }
     }
 
@@ -159,6 +233,7 @@ impl S3ObjStore {
 
         let res = self.state.client.head(url).send().await?;
         if res.status() == StatusCode::NOT_FOUND {
+            self.ensure_bucket_exists().await?;
             return Ok(None);
         }
         let res = Self::error_for_status(res).await?;
@@ -182,6 +257,7 @@ impl S3ObjStore {
         let res = self.state.client.get(url).send().await?;
         tracing::trace!(?res, "response for get_object request");
         if res.status() == StatusCode::NOT_FOUND {
+            self.ensure_bucket_exists().await?;
             return Ok(None);
         }
         let res = Self::error_for_status(res).await?;
@@ -224,28 +300,24 @@ impl S3ObjStore {
             .put_object(Some(&self.state.creds), &s3_key);
 
         if let Some(ct) = &args.content_type {
-            action
-                .headers_mut()
-                .insert(CONTENT_TYPE.to_string(), ct.clone());
+            insert_signed_header(action.headers_mut(), CONTENT_TYPE.as_str(), ct.clone());
         }
         if let Some(v) = &args.content_disposition {
-            action
-                .headers_mut()
-                .insert(CONTENT_DISPOSITION.to_string(), v.clone());
+            insert_signed_header(
+                action.headers_mut(),
+                CONTENT_DISPOSITION.as_str(),
+                v.clone(),
+            );
         }
         if let Some(v) = &args.content_encoding {
-            action
-                .headers_mut()
-                .insert(CONTENT_ENCODING.to_string(), v.clone());
+            insert_signed_header(action.headers_mut(), CONTENT_ENCODING.as_str(), v.clone());
         }
         if let Some(v) = &args.cache_control {
-            action
-                .headers_mut()
-                .insert(CACHE_CONTROL.to_string(), v.clone());
+            insert_signed_header(action.headers_mut(), CACHE_CONTROL.as_str(), v.clone());
         }
         for (k, v) in &args.metadata {
             let name = format!("x-amz-meta-{}", k.to_lowercase().replace('_', "-"));
-            action.headers_mut().insert(name, v.clone());
+            insert_signed_header(action.headers_mut(), name, v.clone());
         }
 
         let url = action.sign(args.valid_for);
@@ -253,8 +325,6 @@ impl S3ObjStore {
     }
 
     pub async fn put_object(&self, mut put: Put) -> Result<ObjectMeta, anyhow::Error> {
-        // If the payload is a stream, use multipart upload for resilience and large sizes.
-
         let mut data = DataSource::Data(Bytes::new());
         std::mem::swap(&mut data, &mut put.data);
 
@@ -268,11 +338,14 @@ impl S3ObjStore {
                 {
                     return self.single_put_stream(put, sized.into_stream(), size).await;
                 }
-                return self.multipart_upload(put, sized.into_stream()).await;
+                return self.put_stream(put, sized.into_stream()).await;
             }
         };
 
-        // Simple upload for buffered data.
+        self.put_bytes(put, data).await
+    }
+
+    async fn put_bytes(&self, put: Put, data: Bytes) -> Result<ObjectMeta, anyhow::Error> {
         let s3_key = self.build_key(&put.key);
         let mut action = self
             .state
@@ -281,11 +354,12 @@ impl S3ObjStore {
         apply_condition_headers(action.headers_mut(), put.conditions)?;
         // forward MIME type header if set
         if let Some(ct) = &put.mime_type {
-            action.headers_mut().insert(CONTENT_TYPE.to_string(), ct);
+            insert_signed_header(action.headers_mut(), CONTENT_TYPE.as_str(), ct.as_str());
         }
         let headers = action.headers_mut().clone();
         let url = action.sign(Self::DURATION);
 
+        let size = data.len() as u64;
         let body = data;
 
         let res = Self::with_signed_headers(self.state.client.put(url), &headers)
@@ -293,15 +367,18 @@ impl S3ObjStore {
             .send()
             .await?;
         let res = Self::error_for_status(res).await?;
-        if self.state.fetch_metadata_after_put {
-            return self
-                .head_object(&put.key)
-                .await?
-                .context("failed to fetch object metadata after put");
-        }
 
-        let meta = parse_object_headers(put.key, res.headers())?;
-        Ok(meta)
+        let mut fallback = ObjectMeta::new(put.key.clone());
+        fallback.size = Some(size);
+        fallback.mime_type = put.mime_type;
+        fallback.etag = Self::etag_from_headers(res.headers())?;
+
+        self.metadata_after_write(
+            &put.key,
+            fallback,
+            "failed to fetch object metadata after put",
+        )
+        .await
     }
 
     async fn single_put_stream(
@@ -332,32 +409,52 @@ impl S3ObjStore {
             .send()
             .await?;
         let res = Self::error_for_status(res).await?;
-        if self.state.fetch_metadata_after_put {
-            return self
-                .head_object(&put.key)
-                .await?
-                .context("failed to fetch object metadata after put");
+
+        let mut fallback = ObjectMeta::new(put.key.clone());
+        fallback.size = Some(size);
+        fallback.mime_type = put.mime_type;
+        fallback.etag = Self::etag_from_headers(res.headers())?;
+
+        self.metadata_after_write(
+            &put.key,
+            fallback,
+            "failed to fetch object metadata after put",
+        )
+        .await
+    }
+
+    async fn put_stream(
+        &self,
+        mut put: Put,
+        mut stream: ValueStream,
+    ) -> Result<ObjectMeta, anyhow::Error> {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.is_empty() {
+                continue;
+            }
+            return self.multipart_upload(put, stream, chunk).await;
         }
 
-        let meta = parse_object_headers(put.key, res.headers())?;
-        Ok(meta)
+        put.data = DataSource::Data(Bytes::new());
+        self.put_bytes(put, Bytes::new()).await
     }
 
     async fn multipart_upload(
         &self,
         put: Put,
-        mut stream: ValueStream,
+        stream: ValueStream,
+        first_chunk: Bytes,
     ) -> Result<ObjectMeta, anyhow::Error> {
         // initiate multipart upload
-        let s3_key = self.build_key(&put.key);
+        let s3_key = self.build_key(&put.key).into_owned();
         let mut create = self
             .state
             .bucket
             .create_multipart_upload(Some(&self.state.creds), &s3_key);
-        apply_condition_headers(create.headers_mut(), put.conditions)?;
         // forward MIME type header if set
         if let Some(ct) = &put.mime_type {
-            create.headers_mut().insert(CONTENT_TYPE.to_string(), ct);
+            insert_signed_header(create.headers_mut(), CONTENT_TYPE.as_str(), ct.as_str());
         }
         let headers = create.headers_mut().clone();
         let url = create.sign(Self::DURATION);
@@ -373,10 +470,53 @@ impl S3ObjStore {
             .context("parsing multipart create response")?;
         let upload_id = multipart.upload_id();
 
+        let upload = MultipartUploadState {
+            key: put.key,
+            s3_key: s3_key.clone(),
+            upload_id: upload_id.to_string(),
+            conditions: put.conditions,
+            mime_type: put.mime_type,
+        };
+
+        let upload_result = self
+            .multipart_upload_after_create(upload, stream, first_chunk)
+            .await;
+
+        if upload_result.is_err() {
+            let abort = AbortMultipartUpload::new(
+                &self.state.bucket,
+                Some(&self.state.creds),
+                &s3_key,
+                upload_id,
+            );
+            let url = abort.sign(Self::DURATION);
+            let _ = self.state.client.delete(url).send().await;
+        }
+
+        upload_result
+    }
+
+    async fn multipart_upload_after_create(
+        &self,
+        upload: MultipartUploadState,
+        mut stream: ValueStream,
+        first_chunk: Bytes,
+    ) -> Result<ObjectMeta, anyhow::Error> {
+        let MultipartUploadState {
+            key,
+            s3_key,
+            upload_id,
+            conditions,
+            mime_type,
+        } = upload;
+
         // upload parts
         let mut part_number = 1u16;
         let mut etags = Vec::new();
+        let mut total_size = 0u64;
         let mut buffer = BytesMut::new();
+        buffer.put_slice(&first_chunk);
+
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             buffer.put_slice(&chunk);
@@ -386,10 +526,11 @@ impl S3ObjStore {
                     Some(&self.state.creds),
                     &s3_key,
                     part_number,
-                    upload_id,
+                    &upload_id,
                 );
                 let url = upload.sign(Self::DURATION);
                 let data = buffer.split().freeze();
+                total_size += data.len() as u64;
                 let res = self.state.client.put(url).body(data).send().await?;
                 let res = Self::error_for_status(res).await?;
                 let etag = res
@@ -403,17 +544,18 @@ impl S3ObjStore {
                 part_number += 1;
             }
         }
-        // final part (include empty buffer for empty stream)
-        if !buffer.is_empty() || etags.is_empty() {
+        // final part
+        if !buffer.is_empty() {
             let upload = UploadPart::new(
                 &self.state.bucket,
                 Some(&self.state.creds),
                 &s3_key,
                 part_number,
-                upload_id,
+                &upload_id,
             );
             let url = upload.sign(Self::DURATION);
             let data = buffer.freeze();
+            total_size += data.len() as u64;
             let res = self.state.client.put(url).body(data).send().await?;
             let res = Self::error_for_status(res).await?;
             let etag = res
@@ -427,23 +569,35 @@ impl S3ObjStore {
         }
 
         // complete multipart upload
-        let complete = CompleteMultipartUpload::new(
+        let mut complete = CompleteMultipartUpload::new(
             &self.state.bucket,
             Some(&self.state.creds),
             &s3_key,
-            upload_id,
+            &upload_id,
             etags.iter().map(|s| s.as_str()),
         );
+        apply_condition_headers(complete.headers_mut(), conditions)?;
+        let headers = complete.headers_mut().clone();
         let url = complete.sign(Self::DURATION);
         let body = complete.body();
-        let resp = self.state.client.post(url).body(body).send().await?;
-        Self::error_for_status(resp).await?;
-        // fetch metadata after completion
-        let meta = self
-            .head_object(&put.key)
-            .await?
-            .context("failed to fetch object metadata after multipart upload")?;
-        Ok(meta)
+        let resp = Self::with_signed_headers(self.state.client.post(url), &headers)
+            .body(body)
+            .send()
+            .await?;
+        let resp = Self::error_for_status(resp).await?;
+        let body = resp.bytes().await?;
+        error_from_success_response_body(&body)?;
+
+        let mut fallback = ObjectMeta::new(key.clone());
+        fallback.size = Some(total_size);
+        fallback.mime_type = mime_type;
+
+        self.metadata_after_write(
+            &key,
+            fallback,
+            "failed to fetch object metadata after multipart upload",
+        )
+        .await
     }
 
     pub async fn delete_object(&self, key: &str) -> Result<(), anyhow::Error> {
@@ -493,17 +647,7 @@ impl S3ObjStore {
 
         let body = res.text().await?;
         let mut data = rusty_s3::actions::ListObjectsV2::parse_response(&body)?;
-
-        for content in &mut data.contents {
-            // Need to urldecode the key.
-            if let Ok(key) = percent_encoding::percent_decode_str(&content.key).decode_utf8() {
-                // TODO: propagate error?
-                content.key = key.into_owned();
-            }
-
-            let key = std::mem::take(&mut content.key);
-            content.key = self.prune_key_prefix(key);
-        }
+        self.normalize_list_response(&mut data);
 
         Ok(data)
     }
@@ -604,8 +748,7 @@ impl ObjStore for S3ObjStore {
     }
 
     async fn healthcheck(&self) -> Result<(), anyhow::Error> {
-        self.head_object("/__healthcheck/i-do-not-exist").await?;
-        Ok(())
+        self.ensure_bucket_exists().await
     }
 
     async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>, anyhow::Error> {
@@ -673,21 +816,32 @@ impl ObjStore for S3ObjStore {
     }
 
     async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta, anyhow::Error> {
-        let s3_key = self.build_key(&copy.target_key);
+        let target_key = copy.target_key;
+        let s3_key = self.build_key(&target_key);
         let mut b = self
             .state
             .bucket
             .put_object(Some(&self.state.creds), &s3_key);
 
+        let source_key = self.build_key(&copy.source_key).into_owned();
+        // Percent-encode each path segment but preserve '/' separators so
+        // internal slashes in object keys are not encoded.
+        let encoded_key = source_key
+            .split('/')
+            .map(|seg| {
+                percent_encoding::utf8_percent_encode(seg, percent_encoding::NON_ALPHANUMERIC)
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("/");
         let source_path = format!(
             "/{}/{}",
             self.state.bucket.name(),
-            copy.source_key.trim_start_matches('/')
+            encoded_key.trim_start_matches('/')
         );
-        b.headers_mut().insert("x-amz-copy-source", source_path);
-        apply_condition_headers(b.headers_mut(), copy.conditions)?;
+        insert_signed_header(b.headers_mut(), "x-amz-copy-source", source_path);
+        apply_copy_source_condition_headers(b.headers_mut(), copy.conditions)?;
 
-        // FIXME: add conditions
         let headers = b.headers_mut().clone();
         let url = b.sign(Self::DURATION);
 
@@ -695,9 +849,21 @@ impl ObjStore for S3ObjStore {
             .send()
             .await?;
         let res = Self::error_for_status(res).await?;
+        let body = res
+            .bytes()
+            .await
+            .context("failed to read copy response body")?;
+        error_from_success_response_body(&body)?;
 
-        let meta = parse_object_headers(copy.target_key, res.headers())?;
-        Ok(meta)
+        let fallback = parse_copy_object_result(target_key.clone(), &body)?
+            .unwrap_or_else(|| ObjectMeta::new(target_key.clone()));
+
+        self.metadata_after_write(
+            &target_key,
+            fallback,
+            "failed to fetch object metadata after copy",
+        )
+        .await
     }
 
     async fn delete(&self, key: &str) -> Result<(), anyhow::Error> {
@@ -712,13 +878,7 @@ impl ObjStore for S3ObjStore {
         let prefixes: Vec<String> = list
             .common_prefixes
             .drain(..)
-            .map(|p| {
-                let val = percent_encoding::percent_decode_str(&p.prefix)
-                    .decode_utf8()
-                    .with_context(|| format!("failed to decode prefix: '{}'", p.prefix))?;
-
-                Ok(val.trim_end_matches(&delim).to_owned())
-            })
+            .map(|p| Ok(p.prefix.trim_end_matches(&delim).to_owned()))
             .collect::<Result<Vec<String>, anyhow::Error>>()?;
         let prefixes = if prefixes.is_empty() {
             None
@@ -754,6 +914,8 @@ impl ObjStore for S3ObjStore {
 mod tests {
     use anyhow::bail;
     use http::HeaderMap;
+    use objstore::{Conditions, MatchValue, ObjStoreExt};
+    use rusty_s3::{Credentials, UrlStyle as RustyUrlStyle};
 
     use crate::S3ObjStoreConfig;
 
@@ -785,6 +947,12 @@ mod tests {
 
         let config = S3ObjStoreConfig::from_uri(&var)?;
         Ok(Some(config))
+    }
+
+    async fn ensure_test_bucket(store: &S3ObjStore) {
+        if read_create_bucket() {
+            let _ = store.bucket_create().await;
+        }
     }
 
     #[test]
@@ -823,6 +991,292 @@ mod tests {
         assert_eq!(meta.hash_sha256, Some(sha_expected.into()));
     }
 
+    #[test]
+    fn test_put_signed_headers_are_lowercase_and_replayed() {
+        let bucket = Bucket::new(
+            "https://s3.example.com".parse().unwrap(),
+            RustyUrlStyle::Path,
+            "bucket",
+            "auto",
+        )
+        .unwrap();
+        let creds = Credentials::new("key", "secret");
+        let mut action = bucket.put_object(Some(&creds), "key");
+
+        let mut conditions = Conditions::new();
+        conditions.if_match = Some(MatchValue::Tags(vec!["etag".to_string()]));
+        apply_condition_headers(action.headers_mut(), conditions).unwrap();
+        insert_signed_header(action.headers_mut(), "Content-Type", "application/zip");
+
+        let headers = action.headers_mut().clone();
+        let signed_url = action.sign(S3ObjStore::DURATION);
+        let signed_headers = signed_url
+            .query_pairs()
+            .find(|(name, _)| name == "X-Amz-SignedHeaders")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+
+        assert_eq!(signed_headers, "content-type;host;if-match");
+
+        let request = S3ObjStore::with_signed_headers(Client::new().put(signed_url), &headers)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers().get("content-type").unwrap(),
+            "application/zip"
+        );
+        assert_eq!(request.headers().get("if-match").unwrap(), "\"etag\"");
+    }
+
+    #[test]
+    fn test_put_if_not_exists_signs_if_none_match() {
+        let bucket = Bucket::new(
+            "https://s3.example.com".parse().unwrap(),
+            RustyUrlStyle::Path,
+            "bucket",
+            "auto",
+        )
+        .unwrap();
+        let creds = Credentials::new("key", "secret");
+        let mut action = bucket.put_object(Some(&creds), "key");
+
+        apply_condition_headers(action.headers_mut(), Conditions::new().if_not_exists()).unwrap();
+
+        let headers = action.headers_mut().clone();
+        let signed_url = action.sign(S3ObjStore::DURATION);
+        let signed_headers = signed_url
+            .query_pairs()
+            .find(|(name, _)| name == "X-Amz-SignedHeaders")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+
+        assert_eq!(signed_headers, "host;if-none-match");
+
+        let request = S3ObjStore::with_signed_headers(Client::new().put(signed_url), &headers)
+            .build()
+            .unwrap();
+        assert_eq!(request.headers().get("if-none-match").unwrap(), "*");
+        assert!(!request.headers().contains_key("if-match"));
+    }
+
+    #[test]
+    fn test_copy_signed_headers_are_lowercase_and_replayed() {
+        let bucket = Bucket::new(
+            "https://s3.example.com".parse().unwrap(),
+            RustyUrlStyle::Path,
+            "bucket",
+            "auto",
+        )
+        .unwrap();
+        let creds = Credentials::new("key", "secret");
+        let mut action = bucket.put_object(Some(&creds), "target");
+
+        insert_signed_header(
+            action.headers_mut(),
+            "X-Amz-Copy-Source",
+            "/bucket/source%20key",
+        );
+        apply_copy_source_condition_headers(
+            action.headers_mut(),
+            Conditions::new().if_unmodified_since(OffsetDateTime::UNIX_EPOCH),
+        )
+        .unwrap();
+
+        let headers = action.headers_mut().clone();
+        let signed_url = action.sign(S3ObjStore::DURATION);
+        let signed_headers = signed_url
+            .query_pairs()
+            .find(|(name, _)| name == "X-Amz-SignedHeaders")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+
+        assert_eq!(
+            signed_headers,
+            "host;x-amz-copy-source;x-amz-copy-source-if-unmodified-since"
+        );
+
+        let request = S3ObjStore::with_signed_headers(Client::new().put(signed_url), &headers)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers().get("x-amz-copy-source").unwrap(),
+            "/bucket/source%20key"
+        );
+        assert!(
+            request
+                .headers()
+                .contains_key("x-amz-copy-source-if-unmodified-since")
+        );
+    }
+
+    #[test]
+    fn test_presigned_upload_url_signs_normalized_headers() {
+        let config = S3ObjStoreConfig {
+            url: "https://s3.example.com".parse().unwrap(),
+            bucket: "bucket".to_string(),
+            region: "auto".to_string(),
+            path_style: crate::UrlStyle::Path,
+            fetch_metadata_after_put: true,
+            key: "key".to_string(),
+            secret: "secret".to_string(),
+            token: None,
+            path_prefix: None,
+        };
+        let store = S3ObjStore::new(config).unwrap();
+
+        let mut args = UploadUrlArgs::new("key", S3ObjStore::DURATION);
+        args.content_type = Some("application/zip".to_string());
+        args.content_disposition = Some("attachment".to_string());
+        args.content_encoding = Some("gzip".to_string());
+        args.cache_control = Some("max-age=60".to_string());
+        args.metadata
+            .insert("Sha256_Checksum".to_string(), "abc".to_string());
+
+        let signed_url = store.presign_upload_url(args).unwrap();
+        let signed_headers = signed_url
+            .query_pairs()
+            .find(|(name, _)| name == "X-Amz-SignedHeaders")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+
+        assert_eq!(
+            signed_headers,
+            "cache-control;content-disposition;content-encoding;content-type;host;x-amz-meta-sha256-checksum"
+        );
+    }
+
+    #[test]
+    fn test_path_prefix_is_normalized_and_pruned_from_list_results() {
+        let config = S3ObjStoreConfig {
+            url: "https://s3.example.com".parse().unwrap(),
+            bucket: "bucket".to_string(),
+            region: "auto".to_string(),
+            path_style: crate::UrlStyle::Path,
+            fetch_metadata_after_put: false,
+            key: "key".to_string(),
+            secret: "secret".to_string(),
+            token: None,
+            path_prefix: Some("/tenant/".to_string()),
+        };
+        let store = S3ObjStore::new(config).unwrap();
+
+        assert_eq!(store.build_key("/file.txt"), "tenant/file.txt");
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                <Contents>
+                    <Key>tenant%2Fnested%2Ffile%20name.txt</Key>
+                    <LastModified>2024-01-01T00:00:00.000Z</LastModified>
+                    <ETag>&quot;d41d8cd98f00b204e9800998ecf8427e&quot;</ETag>
+                    <Size>123</Size>
+                    <StorageClass>STANDARD</StorageClass>
+                </Contents>
+                <CommonPrefixes>
+                    <Prefix>tenant%2Fnested%2Fdir%2F</Prefix>
+                </CommonPrefixes>
+            </ListBucketResult>"#;
+        let mut list = rusty_s3::actions::ListObjectsV2::parse_response(xml).unwrap();
+        store.normalize_list_response(&mut list);
+
+        assert_eq!(list.contents[0].key, "nested/file name.txt");
+        assert_eq!(list.common_prefixes[0].prefix, "nested/dir/");
+    }
+
+    #[test]
+    fn test_multipart_success_response_error_body_is_reported() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+                <Code>EntityTooSmall</Code>
+                <Message>Your proposed upload is smaller than the minimum allowed object size.</Message>
+            </Error>"#;
+
+        let err = error_from_success_response_body(body).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("EntityTooSmall"), "unexpected error: {err}");
+        assert!(
+            err.contains("minimum allowed object size"),
+            "unexpected error: {err}"
+        );
+
+        let ok = br#"<CompleteMultipartUploadResult>
+            <Location>http://example.com/bucket/key</Location>
+            <Bucket>bucket</Bucket>
+            <Key>key</Key>
+            <ETag>&quot;etag&quot;</ETag>
+        </CompleteMultipartUploadResult>"#;
+        error_from_success_response_body(ok).unwrap();
+    }
+
+    #[test]
+    fn test_copy_success_response_error_body_is_reported_before_metadata() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+                <Code>InternalError</Code>
+                <Message>copy failed after response started</Message>
+            </Error>"#;
+
+        let err = error_from_success_response_body(body).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("InternalError"), "unexpected error: {err}");
+        assert!(err.contains("copy failed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_parse_copy_object_result() {
+        let body = br#"<CopyObjectResult>
+            <LastModified>2024-01-01T00:00:00.000Z</LastModified>
+            <ETag>&quot;d41d8cd98f00b204e9800998ecf8427e&quot;</ETag>
+        </CopyObjectResult>"#;
+
+        let meta = parse_copy_object_result("target".to_string(), body)
+            .unwrap()
+            .expect("copy result should parse");
+        assert_eq!(meta.key, "target");
+        assert_eq!(
+            meta.etag.as_deref(),
+            Some("d41d8cd98f00b204e9800998ecf8427e")
+        );
+        assert!(meta.updated_at.is_some());
+    }
+
+    #[test]
+    fn test_complete_multipart_signs_conditions() {
+        let bucket = Bucket::new(
+            "https://s3.example.com".parse().unwrap(),
+            RustyUrlStyle::Path,
+            "bucket",
+            "auto",
+        )
+        .unwrap();
+        let creds = Credentials::new("key", "secret");
+        let etags = ["etag"];
+        let mut complete = CompleteMultipartUpload::new(
+            &bucket,
+            Some(&creds),
+            "key",
+            "upload-id",
+            etags.iter().copied(),
+        );
+
+        apply_condition_headers(complete.headers_mut(), Conditions::new().if_not_exists()).unwrap();
+
+        let headers = complete.headers_mut().clone();
+        let signed_url = complete.sign(S3ObjStore::DURATION);
+        let signed_headers = signed_url
+            .query_pairs()
+            .find(|(name, _)| name == "X-Amz-SignedHeaders")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+
+        assert_eq!(signed_headers, "host;if-none-match");
+
+        let request = S3ObjStore::with_signed_headers(Client::new().post(signed_url), &headers)
+            .body(complete.body())
+            .build()
+            .unwrap();
+        assert_eq!(request.headers().get("if-none-match").unwrap(), "*");
+    }
+
     #[tokio::test]
     async fn test_s3_light() {
         let config = if let Some(config) = load_test_config().unwrap() {
@@ -831,18 +1285,12 @@ mod tests {
             return;
         };
 
-        let create = read_create_bucket();
         let store = S3ObjStore::new(config.clone()).expect("failed to create s3 kv store");
-
-        if create {
-            store
-                .bucket_create()
-                .await
-                .expect("failed to create s3 bucket");
-        }
+        ensure_test_bucket(&store).await;
 
         // Test with prefix.
         objstore_test::test_objstore(&store).await;
+        objstore_test::test_empty_stream_put(&store, "empty-stream").await;
 
         // Test with without.
         let config = S3ObjStoreConfig {
@@ -851,6 +1299,142 @@ mod tests {
         };
         let store = S3ObjStore::new(config).expect("failed to create s3 kv store");
         objstore_test::test_objstore(&store).await;
+        objstore_test::test_empty_stream_put(&store, "empty-stream").await;
+    }
+
+    #[tokio::test]
+    async fn test_s3_write_metadata_fetch_can_be_disabled() {
+        let config = if let Some(config) = load_test_config().unwrap() {
+            config
+        } else {
+            return;
+        };
+        let config = S3ObjStoreConfig {
+            path_prefix: None,
+            fetch_metadata_after_put: false,
+            ..config
+        };
+        let store = S3ObjStore::new(config).expect("failed to create s3 kv store");
+        ensure_test_bucket(&store).await;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let source = format!("regression-fetch-meta-source-{nanos}");
+        let target = format!("regression-fetch-meta-target-{nanos}");
+        let value = Bytes::from(format!("metadata fetch regression {nanos}"));
+        let len = value.len() as u64;
+
+        let put_meta = store
+            .send_put(Put::new(&source, value.clone()))
+            .await
+            .expect("put should succeed");
+        assert_eq!(put_meta.size, Some(len));
+        assert!(
+            put_meta.updated_at.is_none(),
+            "disabled metadata fetch should not HEAD after PUT"
+        );
+
+        let copy_meta = store
+            .send_copy(objstore::Copy::new(&source, &target))
+            .await
+            .expect("copy should succeed");
+        assert_eq!(copy_meta.key, target);
+        assert!(
+            copy_meta.size.is_none(),
+            "CopyObject response does not include object size without a HEAD"
+        );
+
+        assert_eq!(store.get(&target).await.unwrap().unwrap(), value);
+
+        store
+            .delete(&source)
+            .await
+            .expect("failed to clean up source");
+        store
+            .delete(&target)
+            .await
+            .expect("failed to clean up target");
+    }
+
+    #[tokio::test]
+    async fn test_s3_healthcheck_errors_for_missing_bucket() {
+        let config = if let Some(config) = load_test_config().unwrap() {
+            config
+        } else {
+            return;
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let store = S3ObjStore::new(S3ObjStoreConfig {
+            bucket: format!("missing-bucket-{nanos}"),
+            ..config
+        })
+        .expect("failed to create s3 kv store");
+
+        let err = store
+            .healthcheck()
+            .await
+            .expect_err("missing bucket should fail healthcheck")
+            .to_string();
+        assert!(
+            err.contains("bucket does not exist") || err.contains("404"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_s3_multipart_if_not_exists_does_not_overwrite() {
+        use objstore::SizedValueStream;
+
+        let config = if let Some(config) = load_test_config().unwrap() {
+            config
+        } else {
+            return;
+        };
+        let config = S3ObjStoreConfig {
+            path_prefix: None,
+            ..config
+        };
+        let store = S3ObjStore::new(config).expect("failed to create s3 kv store");
+        ensure_test_bucket(&store).await;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let key = format!("regression-multipart-if-not-exists-{nanos}");
+        let original = Bytes::from_static(b"original");
+        store.put(&key).bytes(original.clone()).await.unwrap();
+
+        let chunks = vec![
+            Ok(Bytes::from(vec![b'a'; S3ObjStore::PART_SIZE])),
+            Ok(Bytes::from_static(b"tail")),
+        ];
+        let stream: ValueStream = futures::stream::iter(chunks).boxed();
+        let mut put = Put::new(
+            &key,
+            DataSource::Stream(SizedValueStream::new_without_size(stream)),
+        );
+        put.conditions = Conditions::new().if_not_exists();
+
+        store
+            .send_put(put)
+            .await
+            .expect_err("multipart if-not-exists should fail for an existing object");
+        let got = store.get(&key).await.unwrap().unwrap();
+        assert_eq!(
+            got, original,
+            "failed conditional multipart must not overwrite"
+        );
+
+        store
+            .delete(&key)
+            .await
+            .expect("failed to clean up test object");
     }
 
     /// Regression test for the header-handling fix: a sized stream upload that
@@ -876,6 +1460,7 @@ mod tests {
             ..config
         };
         let store = S3ObjStore::new(config).expect("failed to create s3 kv store");
+        ensure_test_bucket(&store).await;
 
         // Unique key derived from the current time to avoid collisions across runs.
         let nanos = std::time::SystemTime::now()

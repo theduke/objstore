@@ -60,6 +60,7 @@ impl S3ObjStoreConfig {
     const QUERY_PREFIX: &'static str = "prefix";
     const QUERY_TOKEN: &'static str = "token";
     const QUERY_FETCH_METADATA_AFTER_PUT: &'static str = "fetch_metadata_after_put";
+    const QUERY_ENDPOINT_PATH: &'static str = "endpoint_path";
 
     pub fn validate(&self) -> Result<(), anyhow::Error> {
         if !(self.url.scheme() == "http" || self.url.scheme() == "https") {
@@ -82,15 +83,18 @@ impl S3ObjStoreConfig {
     }
 
     pub fn build_uri(&self) -> Result<String, anyhow::Error> {
-        let uri = format!(
-            "{}://{}:{}@{}/{}",
-            Self::URI_SCHEME,
-            self.key,
-            self.secret,
-            self.url.host_str().context("Invalid URL: missing host")?,
-            self.bucket,
-        );
-        let mut url = uri.parse::<Url>()?;
+        let host = self.url.host_str().context("Invalid URL: missing host")?;
+        let port = self
+            .url
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        let mut url =
+            format!("{}://{}{}/{}", Self::URI_SCHEME, host, port, self.bucket).parse::<Url>()?;
+        url.set_username(&self.key)
+            .map_err(|_| anyhow::anyhow!("failed to set access key in URI"))?;
+        url.set_password(Some(&self.secret))
+            .map_err(|_| anyhow::anyhow!("failed to set secret key in URI"))?;
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair(
@@ -101,6 +105,13 @@ impl S3ObjStoreConfig {
                 },
             );
             pairs.append_pair(Self::QUERY_REGION, &self.region);
+            let endpoint_path = self.url.path();
+            if !endpoint_path.is_empty() && endpoint_path != "/" {
+                pairs.append_pair(Self::QUERY_ENDPOINT_PATH, endpoint_path);
+            }
+            if self.url.scheme() == "http" {
+                pairs.append_key_only("insecure");
+            }
             if !self.fetch_metadata_after_put {
                 pairs.append_pair(Self::QUERY_FETCH_METADATA_AFTER_PUT, "false");
             }
@@ -154,19 +165,17 @@ impl S3ObjStoreConfig {
             .find(|(k, _)| k == Self::QUERY_REGION)
             .map(|(_, v)| v.to_string());
 
-        let key = url.authority();
-        let (key, secret) = if let Some((auth, _)) = key.split_once('@') {
-            let (user, pass) = auth.split_once(':').ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Invalid authority format: expected 'user:pass@', got '{}'",
-                    auth
-                )
-            })?;
-
-            (user.to_string(), pass.to_string())
-        } else {
-            bail!("Invalid url: expected '<key>:<secret>@<host>'")
-        };
+        let key = percent_encoding::percent_decode_str(url.username())
+            .decode_utf8()
+            .context("invalid percent-encoded access key in URI")?
+            .into_owned();
+        let secret = url
+            .password()
+            .context("Invalid url: expected '<key>:<secret>@<host>'")?;
+        let secret = percent_encoding::percent_decode_str(secret)
+            .decode_utf8()
+            .context("invalid percent-encoded secret key in URI")?
+            .into_owned();
 
         let mut path_segs = url.path_segments().ok_or_else(|| {
             anyhow::anyhow!(
@@ -211,6 +220,12 @@ impl S3ObjStoreConfig {
             raw.map(|prefix| prefix.to_string())
         };
 
+        let token = query_pairs
+            .iter()
+            .find(|(k, _)| k == Self::QUERY_TOKEN)
+            .map(|(_, v)| v.to_string())
+            .filter(|s| !s.is_empty());
+
         let fetch_metadata_after_put = query_pairs
             .iter()
             .find(|(k, _)| k == Self::QUERY_FETCH_METADATA_AFTER_PUT)
@@ -229,6 +244,11 @@ impl S3ObjStoreConfig {
 
         let insecure = query_pairs.iter().any(|(k, _)| k == "insecure");
         let scheme = if insecure { "http" } else { "https" };
+        let endpoint_path = query_pairs
+            .iter()
+            .find(|(k, _)| k == Self::QUERY_ENDPOINT_PATH)
+            .map(|(_, v)| v.as_ref())
+            .filter(|s| !s.is_empty());
 
         // Since the scheme can not be modified, must construct a new raw url.
         let port = if let Some(port) = url.port() {
@@ -244,6 +264,10 @@ impl S3ObjStoreConfig {
             port,
         )
         .parse::<Url>()?;
+        let mut target_url = target_url;
+        if let Some(endpoint_path) = endpoint_path {
+            target_url.set_path(endpoint_path);
+        }
 
         let config = crate::S3ObjStoreConfig {
             url: target_url,
@@ -253,7 +277,7 @@ impl S3ObjStoreConfig {
             fetch_metadata_after_put,
             key,
             secret,
-            token: None,
+            token,
             path_prefix,
         };
 
@@ -310,6 +334,24 @@ mod tests {
             }"#;
             let config: S3ObjStoreConfig = serde_json::from_str(json).unwrap();
             assert!(config.fetch_metadata_after_put);
+        }
+
+        {
+            let config = S3ObjStoreConfig {
+                url: Url::parse("http://host:9000/base/path/").unwrap(),
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+                path_style: UrlStyle::VirtualHost,
+                fetch_metadata_after_put: false,
+                key: "user:name".to_string(),
+                secret: "pw/@:".to_string(),
+                token: Some("session/token".to_string()),
+                path_prefix: Some("/tenant/path/".to_string()),
+            };
+
+            let uri = config.build_uri().unwrap();
+            let roundtrip = S3ObjStoreConfig::from_uri(&uri).unwrap();
+            assert_eq!(roundtrip, config);
         }
     }
 }
