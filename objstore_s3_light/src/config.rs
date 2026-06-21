@@ -1,4 +1,4 @@
-use anyhow::{Context as _, bail};
+use objstore::{ObjStoreError, Result};
 use rusty_s3::Bucket;
 use url::Url;
 
@@ -62,39 +62,67 @@ impl S3ObjStoreConfig {
     const QUERY_FETCH_METADATA_AFTER_PUT: &'static str = "fetch_metadata_after_put";
     const QUERY_ENDPOINT_PATH: &'static str = "endpoint_path";
 
-    pub fn validate(&self) -> Result<(), anyhow::Error> {
+    pub fn validate(&self) -> Result<()> {
         if !(self.url.scheme() == "http" || self.url.scheme() == "https") {
-            bail!(
-                "Invalid URL scheme: expected http or https, got '{}'",
-                self.url.scheme()
-            );
+            return Err(ObjStoreError::InvalidConfig {
+                message: format!(
+                    "invalid URL scheme: expected http or https, got '{}'",
+                    self.url.scheme()
+                ),
+                source: None,
+            });
         }
         if self.bucket.trim().is_empty() {
-            bail!("Bucket name must not be empty");
+            return Err(ObjStoreError::InvalidConfig {
+                message: "bucket name must not be empty".to_string(),
+                source: None,
+            });
         }
         if self.key.trim().is_empty() {
-            bail!("Access key ID must not be empty");
+            return Err(ObjStoreError::InvalidConfig {
+                message: "access key ID must not be empty".to_string(),
+                source: None,
+            });
         }
         if self.secret.trim().is_empty() {
-            bail!("Secret access key must not be empty");
+            return Err(ObjStoreError::InvalidConfig {
+                message: "secret access key must not be empty".to_string(),
+                source: None,
+            });
         }
 
         Ok(())
     }
 
-    pub fn build_uri(&self) -> Result<String, anyhow::Error> {
-        let host = self.url.host_str().context("Invalid URL: missing host")?;
+    pub fn build_uri(&self) -> Result<String> {
+        let host = self
+            .url
+            .host_str()
+            .ok_or_else(|| ObjStoreError::InvalidConfig {
+                message: "invalid URL: missing host".to_string(),
+                source: None,
+            })?;
         let port = self
             .url
             .port()
             .map(|port| format!(":{port}"))
             .unwrap_or_default();
-        let mut url =
-            format!("{}://{}{}/{}", Self::URI_SCHEME, host, port, self.bucket).parse::<Url>()?;
+        let mut url = format!("{}://{}{}/{}", Self::URI_SCHEME, host, port, self.bucket)
+            .parse::<Url>()
+            .map_err(|source| ObjStoreError::InvalidConfig {
+                message: "failed to build S3 object store URI".to_string(),
+                source: Some(source.into()),
+            })?;
         url.set_username(&self.key)
-            .map_err(|_| anyhow::anyhow!("failed to set access key in URI"))?;
+            .map_err(|_| ObjStoreError::InvalidConfig {
+                message: "failed to set access key in URI".to_string(),
+                source: None,
+            })?;
         url.set_password(Some(&self.secret))
-            .map_err(|_| anyhow::anyhow!("failed to set secret key in URI"))?;
+            .map_err(|_| ObjStoreError::InvalidConfig {
+                message: "failed to set secret key in URI".to_string(),
+                source: None,
+            })?;
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair(
@@ -128,14 +156,17 @@ impl S3ObjStoreConfig {
         Ok(url.to_string())
     }
 
-    pub(crate) fn build_bucket(&self) -> Result<Bucket, anyhow::Error> {
+    pub(crate) fn build_bucket(&self) -> Result<Bucket> {
         Bucket::new(
             self.url.clone(),
             self.path_style.to_rusty(),
             self.bucket.clone(),
             self.region.clone(),
         )
-        .context("could not build rusty_s3 bucket")
+        .map_err(|source| ObjStoreError::InvalidConfig {
+            message: "could not build rusty_s3 bucket".to_string(),
+            source: Some(source.into()),
+        })
     }
 
     pub(crate) fn build_credentials(&self) -> rusty_s3::Credentials {
@@ -146,16 +177,22 @@ impl S3ObjStoreConfig {
         }
     }
 
-    pub fn from_uri(uri: &str) -> Result<Self, anyhow::Error> {
+    pub fn from_uri(uri: &str) -> Result<Self> {
         let url = uri
             .parse::<Url>()
-            .map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", uri, e))?;
+            .map_err(|source| ObjStoreError::InvalidConfig {
+                message: format!("invalid URL '{uri}'"),
+                source: Some(source.into()),
+            })?;
         if url.scheme() != Self::URI_SCHEME {
-            return Err(anyhow::anyhow!(
-                "Invalid scheme: expected '{}', got '{}'",
-                Self::URI_SCHEME,
-                url.scheme()
-            ));
+            return Err(ObjStoreError::InvalidConfig {
+                message: format!(
+                    "invalid scheme: expected '{}', got '{}'",
+                    Self::URI_SCHEME,
+                    url.scheme()
+                ),
+                source: None,
+            });
         }
 
         let query_pairs = url.query_pairs().collect::<Vec<_>>();
@@ -167,47 +204,63 @@ impl S3ObjStoreConfig {
 
         let key = percent_encoding::percent_decode_str(url.username())
             .decode_utf8()
-            .context("invalid percent-encoded access key in URI")?
+            .map_err(|source| ObjStoreError::InvalidConfig {
+                message: "invalid percent-encoded access key in URI".to_string(),
+                source: Some(source.into()),
+            })?
             .into_owned();
-        let secret = url
-            .password()
-            .context("Invalid url: expected '<key>:<secret>@<host>'")?;
+        let secret = url.password().ok_or_else(|| ObjStoreError::InvalidConfig {
+            message: "invalid url: expected '<key>:<secret>@<host>'".to_string(),
+            source: None,
+        })?;
         let secret = percent_encoding::percent_decode_str(secret)
             .decode_utf8()
-            .context("invalid percent-encoded secret key in URI")?
+            .map_err(|source| ObjStoreError::InvalidConfig {
+                message: "invalid percent-encoded secret key in URI".to_string(),
+                source: Some(source.into()),
+            })?
             .into_owned();
 
-        let mut path_segs = url.path_segments().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Invalid URL '{}': must contain bucket name as first path segment",
-                url
-            )
-        })?;
+        let mut path_segs = url
+            .path_segments()
+            .ok_or_else(|| ObjStoreError::InvalidConfig {
+                message: format!(
+                    "invalid URL '{url}': must contain bucket name as first path segment"
+                ),
+                source: None,
+            })?;
 
         let path_style = {
             let raw = query_pairs
                 .iter()
                 .find(|(k, _)| k == Self::QUERY_STYLE)
                 .map(|(_, v)| v)
-                .context("invalid url: missing ?style=[path|domain]")?;
+                .ok_or_else(|| ObjStoreError::InvalidConfig {
+                    message: "invalid url: missing ?style=[path|domain]".to_string(),
+                    source: None,
+                })?;
             match raw.as_ref() {
                 "path" => UrlStyle::Path,
                 "domain" | "virtual" => UrlStyle::VirtualHost,
-                _ => bail!(
-                    "invalid style: expected 'path' / 'domain' / 'virtual', got '{}'",
-                    raw
-                ),
+                _ => {
+                    return Err(ObjStoreError::InvalidConfig {
+                        message: format!(
+                            "invalid style: expected 'path' / 'domain' / 'virtual', got '{raw}'"
+                        ),
+                        source: None,
+                    });
+                }
             }
         };
 
         let bucket = path_segs
             .next()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Invalid URL '{}': must contain bucket name as first path segment",
-                    url
-                )
+            .ok_or_else(|| ObjStoreError::InvalidConfig {
+                message: format!(
+                    "invalid URL '{url}': must contain bucket name as first path segment"
+                ),
+                source: None,
             })?
             .to_string();
 
@@ -232,10 +285,12 @@ impl S3ObjStoreConfig {
             .map(|(_, v)| match v.as_ref() {
                 "true" | "1" => Ok(true),
                 "false" | "0" => Ok(false),
-                other => Err(anyhow::anyhow!(
-                    "invalid fetch_metadata_after_put: expected true/false, got '{}'",
-                    other
-                )),
+                other => Err(ObjStoreError::InvalidConfig {
+                    message: format!(
+                        "invalid fetch_metadata_after_put: expected true/false, got '{other}'"
+                    ),
+                    source: None,
+                }),
             })
             .transpose()?
             .unwrap_or(true);
@@ -260,10 +315,17 @@ impl S3ObjStoreConfig {
         let target_url = format!(
             "{}://{}{}",
             scheme,
-            url.host_str().context("Invalid URL: missing host")?,
+            url.host_str().ok_or_else(|| ObjStoreError::InvalidConfig {
+                message: "invalid URL: missing host".to_string(),
+                source: None,
+            })?,
             port,
         )
-        .parse::<Url>()?;
+        .parse::<Url>()
+        .map_err(|source| ObjStoreError::InvalidConfig {
+            message: "failed to build S3 endpoint URL".to_string(),
+            source: Some(source.into()),
+        })?;
         let mut target_url = target_url;
         if let Some(endpoint_path) = endpoint_path {
             target_url.set_path(endpoint_path);

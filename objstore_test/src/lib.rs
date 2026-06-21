@@ -6,7 +6,8 @@
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt};
 use objstore::{
-    DataSource, ListArgs, ObjStore, ObjStoreExt, ObjectMeta, Put, SizedValueStream, ValueStream,
+    DataSource, ListArgs, ObjStore, ObjStoreError, ObjStoreExt, ObjectMeta, Put, SizedValueStream,
+    ValueStream,
 };
 use pretty_assertions::assert_eq;
 use sha2::Digest as _;
@@ -33,6 +34,10 @@ pub async fn test_objstore(store: &impl ObjStore) {
     test_single_key_flow(store, &prefix).await;
     tracing::info!("finished test_single_key_flow()");
 
+    tracing::info!("running test_error_variants()");
+    test_error_variants(store, &prefix).await;
+    tracing::info!("finished test_error_variants()");
+
     tracing::info!("running test_put_with_mime_type()");
     test_put_with_mime_type(store, &prefix).await;
     tracing::info!("finished test_put_with_mime_type()");
@@ -54,6 +59,22 @@ pub async fn test_objstore(store: &impl ObjStore) {
     store.delete_prefix("").await.unwrap();
     let items = store.list(ListArgs::new()).await.unwrap().items;
     assert_eq!(items.len(), 0);
+}
+
+async fn test_error_variants(store: &impl ObjStore, prefix: &str) {
+    let source = format!("{prefix}/missing-source-{}", Uuid::new_v4());
+    let target = format!("{prefix}/missing-target-{}", Uuid::new_v4());
+
+    let err = store
+        .copy(&source, &target)
+        .send()
+        .await
+        .expect_err("copying a missing source should fail");
+
+    match err {
+        ObjStoreError::ObjectNotFound { key, .. } => assert_eq!(key, source),
+        other => panic!("expected ObjectNotFound for missing copy source, got {other:?}"),
+    }
 }
 
 async fn test_copy_special_chars(store: &impl ObjStore, prefix: &str) {

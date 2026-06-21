@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Context;
+use objstore::{ObjStoreError, Result};
 
 use crate::S3ObjStore;
 
@@ -26,9 +26,13 @@ impl objstore::ObjStoreProvider for S3LightProvider {
         "s3"
     }
 
-    fn build(&self, url: &url::Url) -> Result<objstore::DynObjStore, anyhow::Error> {
-        let config = crate::S3ObjStoreConfig::from_uri(url.as_str())
-            .context("Failed to parse S3 object store configuration from URI")?;
+    fn build(&self, url: &url::Url) -> Result<objstore::DynObjStore> {
+        let config = crate::S3ObjStoreConfig::from_uri(url.as_str()).map_err(|source| {
+            ObjStoreError::InvalidConfig {
+                message: "failed to parse S3 object store configuration from URI".to_string(),
+                source: Some(source.into()),
+            }
+        })?;
         let store = crate::S3ObjStore::new(config)?;
         Ok(Arc::new(store) as objstore::DynObjStore)
     }

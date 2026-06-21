@@ -1,8 +1,8 @@
 use std::{num::NonZeroU32, path::PathBuf};
 
-use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use logfs::{ConfigBuilder, CryptoConfig, LogConfig};
+use objstore::{ObjStoreError, Result};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use zeroize::Zeroizing;
@@ -116,35 +116,48 @@ impl LogFsObjStoreConfig {
         config
     }
 
-    pub fn safe_uri(&self) -> Result<Url, anyhow::Error> {
+    pub fn safe_uri(&self) -> Result<Url> {
         let path = if self.path.is_absolute() {
             self.path.clone()
         } else {
             std::env::current_dir()
-                .context("failed to determine current working directory")?
+                .map_err(|source| ObjStoreError::Io {
+                    operation: objstore::Operation::Build,
+                    source,
+                })?
                 .join(&self.path)
         };
-        let file_url = Url::from_file_path(&path).map_err(|_| {
-            anyhow!(
+        let file_url = Url::from_file_path(&path).map_err(|_| ObjStoreError::InvalidConfig {
+            message: format!(
                 "failed to construct file url from path '{}': path must be absolute",
                 path.display()
-            )
+            ),
+            source: None,
         })?;
         let file_str = file_url.to_string();
         let safe_str = file_str
             .strip_prefix("file:")
             .map(|rest| format!("{}:{}", Self::URI_SCHEME, rest))
-            .ok_or_else(|| anyhow!("expected file:// URL for path"))?;
-        Url::parse(&safe_str).map_err(|err| anyhow!("failed to parse logfs safe URI: {err}"))
+            .ok_or_else(|| ObjStoreError::InvalidConfig {
+                message: "expected file:// URL for path".to_string(),
+                source: None,
+            })?;
+        Url::parse(&safe_str).map_err(|source| ObjStoreError::InvalidConfig {
+            message: "failed to parse logfs safe URI".to_string(),
+            source: Some(source.into()),
+        })
     }
 
-    pub fn from_url(url: &Url) -> Result<Self, anyhow::Error> {
+    pub fn from_url(url: &Url) -> Result<Self> {
         if url.scheme() != Self::URI_SCHEME {
-            bail!(
-                "invalid scheme: expected '{}', got '{}'",
-                Self::URI_SCHEME,
-                url.scheme()
-            );
+            return Err(ObjStoreError::InvalidConfig {
+                message: format!(
+                    "invalid scheme: expected '{}', got '{}'",
+                    Self::URI_SCHEME,
+                    url.scheme()
+                ),
+                source: None,
+            });
         }
 
         let prefix = format!("{}:", Self::URI_SCHEME);
@@ -152,12 +165,20 @@ impl LogFsObjStoreConfig {
             .as_str()
             .strip_prefix(&prefix)
             .map(|rest| format!("file:{rest}"))
-            .ok_or_else(|| anyhow!("invalid logfs url: expected '{}' prefix", prefix))?;
-        let file_url = Url::parse(&file_str)
-            .map_err(|err| anyhow!("failed to parse translated file url: {err}"))?;
+            .ok_or_else(|| ObjStoreError::InvalidConfig {
+                message: format!("invalid logfs url: expected '{prefix}' prefix"),
+                source: None,
+            })?;
+        let file_url = Url::parse(&file_str).map_err(|source| ObjStoreError::InvalidConfig {
+            message: "failed to parse translated file url".to_string(),
+            source: Some(source.into()),
+        })?;
         let path = file_url
             .to_file_path()
-            .map_err(|_| anyhow!("invalid path in logfs url: '{}'", url))?;
+            .map_err(|_| ObjStoreError::InvalidConfig {
+                message: format!("invalid path in logfs url: '{url}'"),
+                source: None,
+            })?;
 
         let mut config = Self::new(path);
         let mut crypto_key: Option<String> = None;
@@ -169,28 +190,41 @@ impl LogFsObjStoreConfig {
                 "readonly" => config.readonly = parse_bool(&value)?,
                 "raw" | "raw_mode" => config.raw_mode = parse_bool(&value)?,
                 "offset" => {
-                    config.offset = Some(
-                        value
-                            .parse::<u64>()
-                            .with_context(|| format!("invalid offset '{value}': expected u64"))?,
-                    )
+                    config.offset = Some(value.parse::<u64>().map_err(|source| {
+                        ObjStoreError::InvalidConfig {
+                            message: format!("invalid offset '{value}': expected u64"),
+                            source: Some(source.into()),
+                        }
+                    })?)
                 }
                 "chunk_size" | "default_chunk_size" => {
-                    config.default_chunk_size =
-                        Some(value.parse::<u32>().with_context(|| {
-                            format!("invalid chunk size '{value}': expected u32")
-                        })?)
+                    config.default_chunk_size = Some(value.parse::<u32>().map_err(|source| {
+                        ObjStoreError::InvalidConfig {
+                            message: format!("invalid chunk size '{value}': expected u32"),
+                            source: Some(source.into()),
+                        }
+                    })?)
                 }
                 "partial_index_interval" => {
                     config.partial_index_write_interval =
-                        Some(value.parse::<u64>().with_context(|| {
-                            format!("invalid partial index interval '{value}': expected u64")
+                        Some(value.parse::<u64>().map_err(|source| {
+                            ObjStoreError::InvalidConfig {
+                                message: format!(
+                                    "invalid partial index interval '{value}': expected u64"
+                                ),
+                                source: Some(source.into()),
+                            }
                         })?)
                 }
                 "full_index_interval" => {
                     config.full_index_write_interval =
-                        Some(value.parse::<u64>().with_context(|| {
-                            format!("invalid full index interval '{value}': expected u64")
+                        Some(value.parse::<u64>().map_err(|source| {
+                            ObjStoreError::InvalidConfig {
+                                message: format!(
+                                    "invalid full index interval '{value}': expected u64"
+                                ),
+                                source: Some(source.into()),
+                            }
                         })?)
                 }
                 "crypto_key" => {
@@ -198,25 +232,41 @@ impl LogFsObjStoreConfig {
                 }
                 "crypto_salt_b64" | "crypto_salt" => {
                     let engine = base64::engine::general_purpose::STANDARD;
-                    let decoded = engine.decode(value.as_ref()).with_context(|| {
-                        format!("invalid base64 salt '{value}': expected valid base64")
+                    let decoded = engine.decode(value.as_ref()).map_err(|source| {
+                        ObjStoreError::InvalidConfig {
+                            message: format!(
+                                "invalid base64 salt '{value}': expected valid base64"
+                            ),
+                            source: Some(source.into()),
+                        }
                     })?;
                     crypto_salt = Some(decoded);
                 }
                 "crypto_iterations" => {
-                    let parsed = value.parse::<u32>().with_context(|| {
-                        format!("invalid crypto iterations '{value}': expected u32")
-                    })?;
+                    let parsed =
+                        value
+                            .parse::<u32>()
+                            .map_err(|source| ObjStoreError::InvalidConfig {
+                                message: format!(
+                                    "invalid crypto iterations '{value}': expected u32"
+                                ),
+                                source: Some(source.into()),
+                            })?;
                     crypto_iterations = Some(NonZeroU32::new(parsed).ok_or_else(|| {
-                        anyhow!("crypto iterations must be non-zero: '{}'", value)
+                        ObjStoreError::InvalidConfig {
+                            message: format!("crypto iterations must be non-zero: '{}'", value),
+                            source: None,
+                        }
                     })?);
                 }
                 other => {
-                    bail!(
-                        "unsupported logfs query parameter '{}': value '{}'",
-                        other,
-                        value
-                    );
+                    return Err(ObjStoreError::InvalidConfig {
+                        message: format!(
+                            "unsupported logfs query parameter '{}': value '{}'",
+                            other, value
+                        ),
+                        source: None,
+                    });
                 }
             }
         }
@@ -231,9 +281,12 @@ impl LogFsObjStoreConfig {
                 });
             }
             _ => {
-                bail!(
-                    "invalid crypto configuration: expected crypto_key, crypto_salt, and crypto_iterations"
-                );
+                return Err(ObjStoreError::InvalidConfig {
+                    message:
+                        "invalid crypto configuration: expected crypto_key, crypto_salt, and crypto_iterations"
+                            .to_string(),
+                    source: None,
+                });
             }
         }
 
@@ -241,13 +294,16 @@ impl LogFsObjStoreConfig {
     }
 }
 
-fn parse_bool(value: &str) -> Result<bool, anyhow::Error> {
+fn parse_bool(value: &str) -> Result<bool> {
     match value {
         "1" | "true" | "on" | "yes" => Ok(true),
         "0" | "false" | "off" | "no" => Ok(false),
-        other => Err(anyhow!(
-            "invalid bool value '{}': expected one of [true,false,1,0,on,off,yes,no]",
-            other
-        )),
+        other => Err(ObjStoreError::InvalidConfig {
+            message: format!(
+                "invalid bool value '{}': expected one of [true,false,1,0,on,off,yes,no]",
+                other
+            ),
+            source: None,
+        }),
     }
 }

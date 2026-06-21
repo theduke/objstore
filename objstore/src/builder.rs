@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{ObjStoreProvider, store::DynObjStore};
+use crate::{ObjStoreError, ObjStoreProvider, Result, store::DynObjStore};
 
 #[derive(Clone, Debug)]
 pub struct ObjStoreBuilder {
@@ -29,17 +29,17 @@ impl ObjStoreBuilder {
         self
     }
 
-    pub fn build(&self, uri: &str) -> Result<DynObjStore, anyhow::Error> {
-        let url = url::Url::parse(uri).map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+    pub fn build(&self, uri: &str) -> Result<DynObjStore> {
+        let url = url::Url::parse(uri).map_err(|source| ObjStoreError::InvalidConfig {
+            message: format!("invalid URL: {uri}"),
+            source: Some(source.into()),
+        })?;
 
         for provider in &self.providers {
             if provider.url_scheme() == url.scheme() {
                 return provider.build(&url);
             }
         }
-        Err(anyhow::anyhow!(
-            "No suitable provider found for URI: {}",
-            url
-        ))
+        Err(ObjStoreError::provider_not_found(url.scheme()))
     }
 }

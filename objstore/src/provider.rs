@@ -1,4 +1,4 @@
-use crate::store::DynObjStore;
+use crate::{Result, store::DynObjStore};
 
 /// A provider/builder for an object store backend.
 ///
@@ -40,5 +40,5 @@ pub trait ObjStoreProvider: Send + Sync + std::fmt::Debug {
     /// eg:
     /// * `memory://`
     /// * `s3://<access_key>:<secret_key>@<url>/bucket`
-    fn build(&self, url: &url::Url) -> Result<DynObjStore, anyhow::Error>;
+    fn build(&self, url: &url::Url) -> Result<DynObjStore>;
 }

@@ -1,7 +1,7 @@
 use objstore::wrapper::prefix::PrefixObjStore;
 use objstore::{
-    DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreExt as _, ObjectMeta, ObjectMetaPage,
-    Put, UploadUrlArgs, ValueStream,
+    DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjStoreExt as _, ObjectMeta,
+    ObjectMetaPage, Put, Result, UploadUrlArgs, ValueStream,
 };
 use objstore_memory::MemoryObjStore;
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,7 @@ struct RecordingListStore {
     args: Mutex<Vec<ListArgs>>,
     list_page: Mutex<Option<ObjectMetaPage>>,
     key_page: Mutex<Option<KeyPage>>,
+    meta_error: Mutex<Option<ObjStoreError>>,
 }
 
 impl RecordingListStore {
@@ -19,6 +20,16 @@ impl RecordingListStore {
             args: Mutex::new(Vec::new()),
             list_page: Mutex::new(Some(list_page)),
             key_page: Mutex::new(None),
+            meta_error: Mutex::new(None),
+        }
+    }
+
+    fn with_meta_error(err: ObjStoreError) -> Self {
+        Self {
+            args: Mutex::new(Vec::new()),
+            list_page: Mutex::new(None),
+            key_page: Mutex::new(None),
+            meta_error: Mutex::new(Some(err)),
         }
     }
 
@@ -44,82 +55,79 @@ impl ObjStore for RecordingListStore {
         &SAFE_URI
     }
 
-    async fn healthcheck(&self) -> Result<(), anyhow::Error> {
+    async fn healthcheck(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn meta(&self, _key: &str) -> Result<Option<ObjectMeta>, anyhow::Error> {
+    async fn meta(&self, _key: &str) -> Result<Option<ObjectMeta>> {
+        if let Some(err) = self.meta_error.lock().unwrap().take() {
+            return Err(err);
+        }
         Ok(None)
     }
 
-    async fn get(&self, _key: &str) -> Result<Option<bytes::Bytes>, anyhow::Error> {
+    async fn get(&self, _key: &str) -> Result<Option<bytes::Bytes>> {
         Ok(None)
     }
 
-    async fn get_stream(&self, _key: &str) -> Result<Option<ValueStream>, anyhow::Error> {
+    async fn get_stream(&self, _key: &str) -> Result<Option<ValueStream>> {
         Ok(None)
     }
 
-    async fn get_with_meta(
-        &self,
-        _key: &str,
-    ) -> Result<Option<(bytes::Bytes, ObjectMeta)>, anyhow::Error> {
+    async fn get_with_meta(&self, _key: &str) -> Result<Option<(bytes::Bytes, ObjectMeta)>> {
         Ok(None)
     }
 
-    async fn get_stream_with_meta(
-        &self,
-        _key: &str,
-    ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error> {
+    async fn get_stream_with_meta(&self, _key: &str) -> Result<Option<(ObjectMeta, ValueStream)>> {
         Ok(None)
     }
 
-    async fn generate_download_url(
-        &self,
-        _args: DownloadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_download_url(&self, _args: DownloadUrlArgs) -> Result<Option<url::Url>> {
         Ok(None)
     }
 
-    async fn generate_upload_url(
-        &self,
-        _args: UploadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_upload_url(&self, _args: UploadUrlArgs) -> Result<Option<url::Url>> {
         Ok(None)
     }
 
-    async fn send_put(&self, _put: Put) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_put(&self, _put: Put) -> Result<ObjectMeta> {
         unreachable!("send_put is not used in these tests")
     }
 
-    async fn send_copy(&self, _copy: objstore::Copy) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_copy(&self, _copy: objstore::Copy) -> Result<ObjectMeta> {
         unreachable!("send_copy is not used in these tests")
     }
 
-    async fn delete(&self, _key: &str) -> Result<(), anyhow::Error> {
+    async fn delete(&self, _key: &str) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_prefix(&self, _prefix: &str) -> Result<(), anyhow::Error> {
+    async fn delete_prefix(&self, _prefix: &str) -> Result<()> {
         Ok(())
     }
 
-    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage> {
         self.args.lock().unwrap().push(args);
         self.list_page
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("list page not configured"))
+            .ok_or_else(|| ObjStoreError::Internal {
+                message: "list page not configured".to_string(),
+                source: None,
+            })
     }
 
-    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage, anyhow::Error> {
+    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage> {
         self.args.lock().unwrap().push(args);
         self.key_page
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("key page not configured"))
+            .ok_or_else(|| ObjStoreError::Internal {
+                message: "key page not configured".to_string(),
+                source: None,
+            })
     }
 }
 
@@ -245,6 +253,26 @@ async fn test_prefix_store_rejects_keys_outside_configured_namespace() {
         err.to_string().contains("outside prefix"),
         "unexpected error: {err:#}"
     );
+}
+
+#[tokio::test]
+async fn test_prefix_store_translates_typed_error_keys() {
+    let inner = RecordingListStore::with_meta_error(ObjStoreError::InvalidMetadata {
+        key: "tenant-a/bad-meta.txt".to_string(),
+        message: "bad header".to_string(),
+        source: None,
+    });
+    let store = PrefixObjStore::new("tenant-a", inner);
+
+    let err = store.meta("bad-meta.txt").await.unwrap_err();
+
+    match err {
+        ObjStoreError::InvalidMetadata { key, message, .. } => {
+            assert_eq!(key, "bad-meta.txt");
+            assert_eq!(message, "bad header");
+        }
+        other => panic!("expected InvalidMetadata, got {other:?}"),
+    }
 }
 
 #[tokio::test]

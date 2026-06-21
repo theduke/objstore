@@ -1,6 +1,5 @@
 use std::{borrow::Cow, sync::Arc, time::Duration};
 
-use anyhow::Context;
 use bytes::Bytes;
 use futures::TryStreamExt as _;
 use http::StatusCode;
@@ -17,16 +16,16 @@ use rusty_s3::actions::{
 use time::OffsetDateTime;
 
 use objstore::{
-    Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta,
-    ObjectMetaPage, Put, UploadUrlArgs, ValueStream,
+    Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError,
+    ObjectMeta, ObjectMetaPage, Operation, Put, Resource, Result as ObjStoreResult, UploadUrlArgs,
+    ValueStream,
 };
 
 use crate::{
     S3ObjStoreConfig,
     util::{
-        apply_condition_headers, apply_copy_source_condition_headers,
-        error_from_success_response_body, insert_signed_header, parse_copy_object_result,
-        parse_object_headers,
+        apply_condition_headers, apply_copy_source_condition_headers, insert_signed_header,
+        parse_copy_object_result, parse_object_headers, parse_s3_error_response,
     },
 };
 
@@ -69,15 +68,46 @@ impl S3ObjStore {
             .expect("failed to build reqwest client")
     }
 
-    pub fn new(config: S3ObjStoreConfig) -> Result<Self, anyhow::Error> {
+    fn dispatch_error(operation: Operation, source: reqwest::Error) -> ObjStoreError {
+        if source.is_timeout() {
+            ObjStoreError::Timeout {
+                operation,
+                source: Some(source.into()),
+            }
+        } else {
+            ObjStoreError::Dispatch {
+                operation,
+                source: source.into(),
+            }
+        }
+    }
+
+    fn response_error(
+        operation: Operation,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> ObjStoreError {
+        ObjStoreError::Response {
+            operation,
+            source: source.into(),
+        }
+    }
+
+    fn invalid_request(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> ObjStoreError {
+        ObjStoreError::InvalidRequest {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn new(config: S3ObjStoreConfig) -> ObjStoreResult<Self> {
         let client = Self::default_client();
         Self::new_with_client(config, client)
     }
 
-    pub fn new_with_client(
-        config: S3ObjStoreConfig,
-        client: Client,
-    ) -> Result<Self, anyhow::Error> {
+    pub fn new_with_client(config: S3ObjStoreConfig, client: Client) -> ObjStoreResult<Self> {
         let path_prefix = if let Some(prefix) = &config.path_prefix {
             let prefix = prefix.trim_matches('/');
             if prefix.is_empty() {
@@ -93,11 +123,20 @@ impl S3ObjStore {
 
         let safe_uri = format!(
             "s3://{}/{}",
-            config.url.host_str().context("missing host in URL")?,
+            config
+                .url
+                .host_str()
+                .ok_or_else(|| ObjStoreError::InvalidConfig {
+                    message: "missing host in URL".to_string(),
+                    source: None,
+                })?,
             config.bucket
         )
         .parse::<Url>()
-        .context("failed to build safe-url")?;
+        .map_err(|source| ObjStoreError::InvalidConfig {
+            message: "failed to build safe-url".to_string(),
+            source: Some(source.into()),
+        })?;
 
         Ok(Self {
             state: Arc::new(State {
@@ -112,12 +151,25 @@ impl S3ObjStore {
     }
 
     /// Create the configured bucket using a signed S3 PUT request.
-    pub async fn bucket_create(&self) -> Result<(), anyhow::Error> {
+    pub async fn bucket_create(&self) -> ObjStoreResult<()> {
         let action = self.state.bucket.create_bucket(&self.state.creds);
         let url = action.sign(Self::DURATION);
 
-        let res = self.state.client.put(url).send().await?;
-        Self::error_for_status(res).await?;
+        let res = self
+            .state
+            .client
+            .put(url)
+            .send()
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
+        Self::error_for_status(
+            res,
+            Operation::Put,
+            Some(Resource::Bucket {
+                bucket: self.state.bucket.name().to_string(),
+            }),
+        )
+        .await?;
 
         Ok(())
     }
@@ -171,37 +223,192 @@ impl S3ObjStore {
         }
     }
 
-    async fn error_for_status(res: reqwest::Response) -> Result<reqwest::Response, anyhow::Error> {
+    fn classify_s3_error(
+        status: StatusCode,
+        headers: &http::HeaderMap,
+        body: &[u8],
+        operation: Operation,
+        resource: Option<Resource>,
+    ) -> ObjStoreError {
+        let parsed = parse_s3_error_response(body);
+        let code = parsed.as_ref().and_then(|err| err.code.clone());
+        let message = parsed
+            .as_ref()
+            .and_then(|err| err.message.clone())
+            .or_else(|| {
+                let text = String::from_utf8_lossy(body).trim().to_string();
+                (!text.is_empty()).then_some(text)
+            });
+        let request_id = parsed
+            .as_ref()
+            .and_then(|err| err.request_id.clone())
+            .or_else(|| {
+                headers
+                    .get("x-amz-request-id")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            });
+        let extended_request_id = parsed
+            .as_ref()
+            .and_then(|err| err.extended_request_id.clone())
+            .or_else(|| {
+                headers
+                    .get("x-amz-id-2")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            });
+
+        match status {
+            StatusCode::UNAUTHORIZED => ObjStoreError::Unauthenticated { source: None },
+            StatusCode::FORBIDDEN => ObjStoreError::PermissionDenied {
+                operation,
+                resource,
+                source: None,
+            },
+            StatusCode::NOT_FOUND => match resource.clone() {
+                Some(Resource::Bucket { bucket }) => ObjStoreError::BucketNotFound {
+                    bucket,
+                    source: None,
+                },
+                Some(Resource::Object { key }) => {
+                    ObjStoreError::ObjectNotFound { key, source: None }
+                }
+                _ => ObjStoreError::Backend {
+                    backend: Self::KIND,
+                    operation,
+                    resource,
+                    code,
+                    status: Some(status.as_u16()),
+                    message,
+                    request_id,
+                    extended_request_id,
+                    source: None,
+                },
+            },
+            StatusCode::PRECONDITION_FAILED => ObjStoreError::PreconditionFailed {
+                operation,
+                resource,
+                source: None,
+            },
+            StatusCode::CONFLICT => {
+                if matches!(
+                    code.as_deref(),
+                    Some("BucketAlreadyExists" | "BucketAlreadyOwnedByYou")
+                ) {
+                    if let Some(Resource::Bucket { bucket }) = resource.clone() {
+                        return ObjStoreError::AlreadyExists {
+                            resource: Resource::Bucket { bucket },
+                            source: None,
+                        };
+                    }
+                }
+                ObjStoreError::Backend {
+                    backend: Self::KIND,
+                    operation,
+                    resource,
+                    code,
+                    status: Some(status.as_u16()),
+                    message,
+                    request_id,
+                    extended_request_id,
+                    source: None,
+                }
+            }
+            StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => ObjStoreError::Timeout {
+                operation,
+                source: None,
+            },
+            _ => ObjStoreError::Backend {
+                backend: Self::KIND,
+                operation,
+                resource,
+                code,
+                status: Some(status.as_u16()),
+                message,
+                request_id,
+                extended_request_id,
+                source: None,
+            },
+        }
+    }
+
+    async fn error_for_status(
+        res: reqwest::Response,
+        operation: Operation,
+        resource: Option<Resource>,
+    ) -> ObjStoreResult<reqwest::Response> {
         if res.status().is_success() {
             Ok(res)
         } else {
             let status = res.status();
-            let body = res.text().await.context("failed to read response body")?;
-            Err(anyhow::anyhow!("S3 request failed: {}: {}", status, body))
+            let headers = res.headers().clone();
+            let body = res
+                .bytes()
+                .await
+                .map_err(|source| Self::response_error(operation, source))?;
+            Err(Self::classify_s3_error(
+                status, &headers, &body, operation, resource,
+            ))
         }
     }
 
-    async fn ensure_bucket_exists(&self) -> Result<(), anyhow::Error> {
+    fn error_from_success_body(
+        body: &[u8],
+        operation: Operation,
+        resource: Option<Resource>,
+    ) -> ObjStoreResult<()> {
+        let Some(err) = parse_s3_error_response(body) else {
+            return Ok(());
+        };
+
+        Err(ObjStoreError::Backend {
+            backend: Self::KIND,
+            operation,
+            resource,
+            code: err.code.clone(),
+            status: None,
+            message: err.message.clone(),
+            request_id: err.request_id,
+            extended_request_id: err.extended_request_id,
+            source: None,
+        })
+    }
+
+    async fn ensure_bucket_exists(&self) -> ObjStoreResult<()> {
         let action = self.state.bucket.head_bucket(Some(&self.state.creds));
         let url = action.sign(Self::DURATION);
 
-        let res = self.state.client.head(url).send().await?;
+        let res = self
+            .state
+            .client
+            .head(url)
+            .send()
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Healthcheck, source))?;
         if res.status() == StatusCode::NOT_FOUND {
-            return Err(anyhow::anyhow!(
-                "S3 bucket does not exist: {}",
-                self.state.bucket.name()
-            ));
+            return Err(ObjStoreError::bucket_not_found(self.state.bucket.name()));
         }
-        Self::error_for_status(res).await?;
+        Self::error_for_status(
+            res,
+            Operation::Healthcheck,
+            Some(Resource::Bucket {
+                bucket: self.state.bucket.name().to_string(),
+            }),
+        )
+        .await?;
         Ok(())
     }
 
-    fn etag_from_headers(headers: &http::HeaderMap) -> Result<Option<String>, anyhow::Error> {
+    fn etag_from_headers(headers: &http::HeaderMap) -> ObjStoreResult<Option<String>> {
         headers
             .get(ETAG)
             .map(|v| {
                 Ok(v.to_str()
-                    .context("invalid etag header")?
+                    .map_err(|source| ObjStoreError::InvalidMetadata {
+                        key: "<response>".to_string(),
+                        message: "invalid etag header".to_string(),
+                        source: Some(source.into()),
+                    })?
                     .trim_matches('"')
                     .trim()
                     .to_string())
@@ -214,15 +421,29 @@ impl S3ObjStore {
         key: &str,
         fallback: ObjectMeta,
         context: &'static str,
-    ) -> Result<ObjectMeta, anyhow::Error> {
+    ) -> ObjStoreResult<ObjectMeta> {
         if self.state.fetch_metadata_after_put {
-            self.head_object(key).await?.context(context)
+            self.head_object(key)
+                .await?
+                .ok_or_else(|| ObjStoreError::Backend {
+                    backend: Self::KIND,
+                    operation: Operation::Meta,
+                    resource: Some(Resource::Object {
+                        key: key.to_string(),
+                    }),
+                    code: None,
+                    status: None,
+                    message: Some(context.to_string()),
+                    request_id: None,
+                    extended_request_id: None,
+                    source: None,
+                })
         } else {
             Ok(fallback)
         }
     }
 
-    pub async fn head_object(&self, key: &str) -> Result<Option<ObjectMeta>, anyhow::Error> {
+    pub async fn head_object(&self, key: &str) -> ObjStoreResult<Option<ObjectMeta>> {
         let s3_key = self.build_key(key);
         let url = self
             .state
@@ -231,12 +452,25 @@ impl S3ObjStore {
             .sign(Self::DURATION);
         tracing::trace!(%s3_key, %url, "sending head_object request to s3");
 
-        let res = self.state.client.head(url).send().await?;
+        let res = self
+            .state
+            .client
+            .head(url)
+            .send()
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Meta, source))?;
         if res.status() == StatusCode::NOT_FOUND {
             self.ensure_bucket_exists().await?;
             return Ok(None);
         }
-        let res = Self::error_for_status(res).await?;
+        let res = Self::error_for_status(
+            res,
+            Operation::Meta,
+            Some(Resource::Object {
+                key: key.to_string(),
+            }),
+        )
+        .await?;
         let head = parse_object_headers(key.to_owned(), res.headers())?;
 
         Ok(Some(head))
@@ -245,7 +479,7 @@ impl S3ObjStore {
     pub async fn get_object_response(
         &self,
         key: &str,
-    ) -> Result<Option<(ObjectMeta, reqwest::Response)>, anyhow::Error> {
+    ) -> ObjStoreResult<Option<(ObjectMeta, reqwest::Response)>> {
         let s3_key = self.build_key(key);
         tracing::trace!(%s3_key, "loading key from s3");
         let url = self
@@ -254,33 +488,46 @@ impl S3ObjStore {
             .get_object(Some(&self.state.creds), &s3_key)
             .sign(std::time::Duration::from_secs(60 * 60));
 
-        let res = self.state.client.get(url).send().await?;
+        let res = self
+            .state
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Get, source))?;
         tracing::trace!(?res, "response for get_object request");
         if res.status() == StatusCode::NOT_FOUND {
             self.ensure_bucket_exists().await?;
             return Ok(None);
         }
-        let res = Self::error_for_status(res).await?;
+        let res = Self::error_for_status(
+            res,
+            Operation::Get,
+            Some(Resource::Object {
+                key: key.to_string(),
+            }),
+        )
+        .await?;
 
         let head = parse_object_headers(key.to_owned(), res.headers())?;
 
         Ok(Some((head, res)))
     }
 
-    pub async fn get_object(
-        &self,
-        key: &str,
-    ) -> Result<Option<(Bytes, ObjectMeta)>, anyhow::Error> {
+    pub async fn get_object(&self, key: &str) -> ObjStoreResult<Option<(Bytes, ObjectMeta)>> {
         match self.get_object_response(key).await? {
             Some((head, res)) => {
-                let bytes = res.bytes().await.context("failed to read response body")?;
+                let bytes = res
+                    .bytes()
+                    .await
+                    .map_err(|source| Self::response_error(Operation::Get, source))?;
                 Ok(Some((bytes, head)))
             }
             None => Ok(None),
         }
     }
 
-    fn generate_download_url(&self, args: DownloadUrlArgs) -> Result<Url, anyhow::Error> {
+    fn generate_download_url(&self, args: DownloadUrlArgs) -> ObjStoreResult<Url> {
         let s3_key = self.build_key(&args.key);
 
         let url = self
@@ -292,7 +539,7 @@ impl S3ObjStore {
         Ok(url)
     }
 
-    fn presign_upload_url(&self, args: UploadUrlArgs) -> Result<Url, anyhow::Error> {
+    fn presign_upload_url(&self, args: UploadUrlArgs) -> ObjStoreResult<Url> {
         let s3_key = self.build_key(&args.key);
         let mut action = self
             .state
@@ -324,7 +571,7 @@ impl S3ObjStore {
         Ok(url)
     }
 
-    pub async fn put_object(&self, mut put: Put) -> Result<ObjectMeta, anyhow::Error> {
+    pub async fn put_object(&self, mut put: Put) -> ObjStoreResult<ObjectMeta> {
         let mut data = DataSource::Data(Bytes::new());
         std::mem::swap(&mut data, &mut put.data);
 
@@ -345,13 +592,15 @@ impl S3ObjStore {
         self.put_bytes(put, data).await
     }
 
-    async fn put_bytes(&self, put: Put, data: Bytes) -> Result<ObjectMeta, anyhow::Error> {
+    async fn put_bytes(&self, put: Put, data: Bytes) -> ObjStoreResult<ObjectMeta> {
         let s3_key = self.build_key(&put.key);
         let mut action = self
             .state
             .bucket
             .put_object(Some(&self.state.creds), &s3_key);
-        apply_condition_headers(action.headers_mut(), put.conditions)?;
+        apply_condition_headers(action.headers_mut(), put.conditions).map_err(|source| {
+            Self::invalid_request("failed to format put condition headers", source)
+        })?;
         // forward MIME type header if set
         if let Some(ct) = &put.mime_type {
             insert_signed_header(action.headers_mut(), CONTENT_TYPE.as_str(), ct.as_str());
@@ -365,8 +614,16 @@ impl S3ObjStore {
         let res = Self::with_signed_headers(self.state.client.put(url), &headers)
             .body(body)
             .send()
-            .await?;
-        let res = Self::error_for_status(res).await?;
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
+        let res = Self::error_for_status(
+            res,
+            Operation::Put,
+            Some(Resource::Object {
+                key: put.key.clone(),
+            }),
+        )
+        .await?;
 
         let mut fallback = ObjectMeta::new(put.key.clone());
         fallback.size = Some(size);
@@ -386,13 +643,15 @@ impl S3ObjStore {
         put: Put,
         stream: ValueStream,
         size: u64,
-    ) -> Result<ObjectMeta, anyhow::Error> {
+    ) -> ObjStoreResult<ObjectMeta> {
         let s3_key = self.build_key(&put.key);
         let mut action = self
             .state
             .bucket
             .put_object(Some(&self.state.creds), &s3_key);
-        apply_condition_headers(action.headers_mut(), put.conditions)?;
+        apply_condition_headers(action.headers_mut(), put.conditions).map_err(|source| {
+            Self::invalid_request("failed to format put condition headers", source)
+        })?;
         if let Some(ct) = &put.mime_type {
             action.headers_mut().insert(CONTENT_TYPE.to_string(), ct);
         }
@@ -407,8 +666,16 @@ impl S3ObjStore {
         let res = Self::with_signed_headers(self.state.client.put(url), &headers)
             .body(body)
             .send()
-            .await?;
-        let res = Self::error_for_status(res).await?;
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
+        let res = Self::error_for_status(
+            res,
+            Operation::Put,
+            Some(Resource::Object {
+                key: put.key.clone(),
+            }),
+        )
+        .await?;
 
         let mut fallback = ObjectMeta::new(put.key.clone());
         fallback.size = Some(size);
@@ -427,7 +694,7 @@ impl S3ObjStore {
         &self,
         mut put: Put,
         mut stream: ValueStream,
-    ) -> Result<ObjectMeta, anyhow::Error> {
+    ) -> ObjStoreResult<ObjectMeta> {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             if chunk.is_empty() {
@@ -445,7 +712,7 @@ impl S3ObjStore {
         put: Put,
         stream: ValueStream,
         first_chunk: Bytes,
-    ) -> Result<ObjectMeta, anyhow::Error> {
+    ) -> ObjStoreResult<ObjectMeta> {
         // initiate multipart upload
         let s3_key = self.build_key(&put.key).into_owned();
         let mut create = self
@@ -460,14 +727,22 @@ impl S3ObjStore {
         let url = create.sign(Self::DURATION);
         let resp = Self::with_signed_headers(self.state.client.post(url), &headers)
             .send()
-            .await?;
-        let resp = Self::error_for_status(resp).await?;
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
+        let resp = Self::error_for_status(
+            resp,
+            Operation::Put,
+            Some(Resource::Object {
+                key: put.key.clone(),
+            }),
+        )
+        .await?;
         let body = resp
             .text()
             .await
-            .context("reading multipart create response")?;
+            .map_err(|source| Self::response_error(Operation::Put, source))?;
         let multipart = CreateMultipartUpload::parse_response(&body)
-            .context("parsing multipart create response")?;
+            .map_err(|source| Self::response_error(Operation::Put, source))?;
         let upload_id = multipart.upload_id();
 
         let upload = MultipartUploadState {
@@ -501,7 +776,7 @@ impl S3ObjStore {
         upload: MultipartUploadState,
         mut stream: ValueStream,
         first_chunk: Bytes,
-    ) -> Result<ObjectMeta, anyhow::Error> {
+    ) -> ObjStoreResult<ObjectMeta> {
         let MultipartUploadState {
             key,
             s3_key,
@@ -531,13 +806,34 @@ impl S3ObjStore {
                 let url = upload.sign(Self::DURATION);
                 let data = buffer.split().freeze();
                 total_size += data.len() as u64;
-                let res = self.state.client.put(url).body(data).send().await?;
-                let res = Self::error_for_status(res).await?;
+                let res = self
+                    .state
+                    .client
+                    .put(url)
+                    .body(data)
+                    .send()
+                    .await
+                    .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
+                let res = Self::error_for_status(
+                    res,
+                    Operation::Put,
+                    Some(Resource::Object { key: key.clone() }),
+                )
+                .await?;
                 let etag = res
                     .headers()
                     .get(ETAG)
-                    .context("missing ETag for multipart part")?
-                    .to_str()?
+                    .ok_or_else(|| ObjStoreError::InvalidMetadata {
+                        key: key.clone(),
+                        message: "missing ETag for multipart part".to_string(),
+                        source: None,
+                    })?
+                    .to_str()
+                    .map_err(|source| ObjStoreError::InvalidMetadata {
+                        key: key.clone(),
+                        message: "invalid ETag for multipart part".to_string(),
+                        source: Some(source.into()),
+                    })?
                     .trim_matches('"')
                     .to_string();
                 etags.push(etag);
@@ -556,13 +852,34 @@ impl S3ObjStore {
             let url = upload.sign(Self::DURATION);
             let data = buffer.freeze();
             total_size += data.len() as u64;
-            let res = self.state.client.put(url).body(data).send().await?;
-            let res = Self::error_for_status(res).await?;
+            let res = self
+                .state
+                .client
+                .put(url)
+                .body(data)
+                .send()
+                .await
+                .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
+            let res = Self::error_for_status(
+                res,
+                Operation::Put,
+                Some(Resource::Object { key: key.clone() }),
+            )
+            .await?;
             let etag = res
                 .headers()
                 .get(ETAG)
-                .context("missing ETag for multipart last part")?
-                .to_str()?
+                .ok_or_else(|| ObjStoreError::InvalidMetadata {
+                    key: key.clone(),
+                    message: "missing ETag for multipart last part".to_string(),
+                    source: None,
+                })?
+                .to_str()
+                .map_err(|source| ObjStoreError::InvalidMetadata {
+                    key: key.clone(),
+                    message: "invalid ETag for multipart last part".to_string(),
+                    source: Some(source.into()),
+                })?
                 .trim_matches('"')
                 .to_string();
             etags.push(etag);
@@ -576,17 +893,35 @@ impl S3ObjStore {
             &upload_id,
             etags.iter().map(|s| s.as_str()),
         );
-        apply_condition_headers(complete.headers_mut(), conditions)?;
+        apply_condition_headers(complete.headers_mut(), conditions).map_err(|source| {
+            Self::invalid_request(
+                "failed to format multipart complete condition headers",
+                source,
+            )
+        })?;
         let headers = complete.headers_mut().clone();
         let url = complete.sign(Self::DURATION);
         let body = complete.body();
         let resp = Self::with_signed_headers(self.state.client.post(url), &headers)
             .body(body)
             .send()
-            .await?;
-        let resp = Self::error_for_status(resp).await?;
-        let body = resp.bytes().await?;
-        error_from_success_response_body(&body)?;
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
+        let resp = Self::error_for_status(
+            resp,
+            Operation::Put,
+            Some(Resource::Object { key: key.clone() }),
+        )
+        .await?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|source| Self::response_error(Operation::Put, source))?;
+        Self::error_from_success_body(
+            &body,
+            Operation::Put,
+            Some(Resource::Object { key: key.clone() }),
+        )?;
 
         let mut fallback = ObjectMeta::new(key.clone());
         fallback.size = Some(total_size);
@@ -600,23 +935,33 @@ impl S3ObjStore {
         .await
     }
 
-    pub async fn delete_object(&self, key: &str) -> Result<(), anyhow::Error> {
+    pub async fn delete_object(&self, key: &str) -> ObjStoreResult<()> {
         let url = self
             .state
             .bucket
             .delete_object(Some(&self.state.creds), &self.build_key(key))
             .sign(Self::DURATION);
 
-        let res = self.state.client.delete(url).send().await?;
-        Self::error_for_status(res).await?;
+        let res = self
+            .state
+            .client
+            .delete(url)
+            .send()
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Delete, source))?;
+        Self::error_for_status(
+            res,
+            Operation::Delete,
+            Some(Resource::Object {
+                key: key.to_string(),
+            }),
+        )
+        .await?;
 
         Ok(())
     }
 
-    pub async fn list_objects(
-        &self,
-        args: ListArgs,
-    ) -> Result<ListObjectsV2Response, anyhow::Error> {
+    pub async fn list_objects(&self, args: ListArgs) -> ObjStoreResult<ListObjectsV2Response> {
         let mut prep = self.state.bucket.list_objects_v2(Some(&self.state.creds));
 
         let prefix = if let Some(prefix) = args.prefix() {
@@ -636,32 +981,54 @@ impl S3ObjStore {
             prep.with_continuation_token(cursor);
         }
         if let Some(limit) = args.limit() {
-            let limit: usize = limit.try_into().context("limit is too large")?;
+            let limit: usize = limit
+                .try_into()
+                .map_err(|source| Self::invalid_request("list limit is too large", source))?;
             prep.with_max_keys(limit);
         }
 
         let url = prep.sign(Self::DURATION);
         tracing::trace!(?prefix, %url, "listing objects in s3");
-        let res = self.state.client.get(url).send().await?;
-        let res = Self::error_for_status(res).await?;
+        let res = self
+            .state
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::List, source))?;
+        let res = Self::error_for_status(
+            res,
+            Operation::List,
+            prefix.map(|prefix| Resource::Prefix { prefix }),
+        )
+        .await?;
 
-        let body = res.text().await?;
-        let mut data = rusty_s3::actions::ListObjectsV2::parse_response(&body)?;
+        let body = res
+            .text()
+            .await
+            .map_err(|source| Self::response_error(Operation::List, source))?;
+        let mut data = rusty_s3::actions::ListObjectsV2::parse_response(&body)
+            .map_err(|source| Self::response_error(Operation::List, source))?;
         self.normalize_list_response(&mut data);
 
         Ok(data)
     }
 
-    fn list_to_metas(&self, list: ListObjectsV2Response) -> Result<Vec<ObjectMeta>, anyhow::Error> {
+    fn list_to_metas(&self, list: ListObjectsV2Response) -> ObjStoreResult<Vec<ObjectMeta>> {
         list.contents
             .into_iter()
-            .map(|o| -> Result<ObjectMeta, anyhow::Error> {
+            .map(|o| -> ObjStoreResult<ObjectMeta> {
                 let key = self.prune_key_prefix(o.key);
-                let mut meta = ObjectMeta::new(key);
+                let mut meta = ObjectMeta::new(key.clone());
                 let updated_at = OffsetDateTime::parse(
                     &o.last_modified,
                     &time::format_description::well_known::Iso8601::DEFAULT,
-                )?;
+                )
+                .map_err(|source| ObjStoreError::InvalidMetadata {
+                    key: key.clone(),
+                    message: "failed to parse S3 list LastModified value".to_string(),
+                    source: Some(source.into()),
+                })?;
 
                 meta.etag = Some(o.etag.trim_matches('"').trim().to_string());
                 meta.size = Some(o.size);
@@ -684,10 +1051,10 @@ impl S3ObjStore {
 
                 Ok(meta)
             })
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<ObjStoreResult<Vec<_>>>()
     }
 
-    pub async fn delete_all(&self, prefix: &str) -> Result<(), anyhow::Error> {
+    pub async fn delete_all(&self, prefix: &str) -> ObjStoreResult<()> {
         // Since S3 does not have a "delete prefix" operation, we need to
         // emulate it by first listing all the keys, and then deleting them.
 
@@ -747,35 +1114,38 @@ impl ObjStore for S3ObjStore {
         &self.state.safe_uri
     }
 
-    async fn healthcheck(&self) -> Result<(), anyhow::Error> {
-        self.ensure_bucket_exists().await
+    async fn healthcheck(&self) -> ObjStoreResult<()> {
+        self.ensure_bucket_exists().await?;
+        Ok(())
     }
 
-    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>, anyhow::Error> {
+    async fn meta(&self, key: &str) -> ObjStoreResult<Option<ObjectMeta>> {
         match self.head_object(key).await? {
             Some(h) => Ok(Some(h)),
             None => Ok(None),
         }
     }
 
-    async fn get(&self, key: &str) -> Result<Option<Bytes>, anyhow::Error> {
+    async fn get(&self, key: &str) -> ObjStoreResult<Option<Bytes>> {
         match self.get_object(key).await? {
             Some((bytes, _)) => Ok(Some(bytes)),
             None => Ok(None),
         }
     }
 
-    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>, anyhow::Error> {
+    async fn get_stream(&self, key: &str) -> ObjStoreResult<Option<ValueStream>> {
         match self.get_object_response(key).await? {
             Some((_, res)) => {
-                let stream = res.bytes_stream().map_err(anyhow::Error::from);
+                let stream = res
+                    .bytes_stream()
+                    .map_err(|source| Self::response_error(Operation::GetStream, source));
                 Ok(Some(Box::pin(stream)))
             }
             None => Ok(None),
         }
     }
 
-    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>, anyhow::Error> {
+    async fn get_with_meta(&self, key: &str) -> ObjStoreResult<Option<(Bytes, ObjectMeta)>> {
         match self.get_object(key).await? {
             Some((bytes, meta)) => Ok(Some((bytes, meta))),
             None => Ok(None),
@@ -785,10 +1155,12 @@ impl ObjStore for S3ObjStore {
     async fn get_stream_with_meta(
         &self,
         key: &str,
-    ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error> {
+    ) -> ObjStoreResult<Option<(ObjectMeta, ValueStream)>> {
         match self.get_object_response(key).await? {
             Some((meta, res)) => {
-                let stream = res.bytes_stream().map_err(anyhow::Error::from);
+                let stream = res
+                    .bytes_stream()
+                    .map_err(|source| Self::response_error(Operation::GetStream, source));
                 Ok(Some((meta, Box::pin(stream))))
             }
             None => Ok(None),
@@ -798,24 +1170,22 @@ impl ObjStore for S3ObjStore {
     async fn generate_download_url(
         &self,
         args: DownloadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    ) -> ObjStoreResult<Option<url::Url>> {
         let url = Self::generate_download_url(self, args)?;
         Ok(Some(url))
     }
 
-    async fn generate_upload_url(
-        &self,
-        args: UploadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_upload_url(&self, args: UploadUrlArgs) -> ObjStoreResult<Option<url::Url>> {
         let url = Self::presign_upload_url(self, args)?;
         Ok(Some(url))
     }
 
-    async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
-        self.put_object(put).await
+    async fn send_put(&self, put: Put) -> ObjStoreResult<ObjectMeta> {
+        Ok(self.put_object(put).await?)
     }
 
-    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_copy(&self, copy: Copy) -> ObjStoreResult<ObjectMeta> {
+        let source_key = copy.source_key;
         let target_key = copy.target_key;
         let s3_key = self.build_key(&target_key);
         let mut b = self
@@ -823,10 +1193,10 @@ impl ObjStore for S3ObjStore {
             .bucket
             .put_object(Some(&self.state.creds), &s3_key);
 
-        let source_key = self.build_key(&copy.source_key).into_owned();
+        let s3_source_key = self.build_key(&source_key).into_owned();
         // Percent-encode each path segment but preserve '/' separators so
         // internal slashes in object keys are not encoded.
-        let encoded_key = source_key
+        let encoded_key = s3_source_key
             .split('/')
             .map(|seg| {
                 percent_encoding::utf8_percent_encode(seg, percent_encoding::NON_ALPHANUMERIC)
@@ -840,37 +1210,57 @@ impl ObjStore for S3ObjStore {
             encoded_key.trim_start_matches('/')
         );
         insert_signed_header(b.headers_mut(), "x-amz-copy-source", source_path);
-        apply_copy_source_condition_headers(b.headers_mut(), copy.conditions)?;
+        apply_copy_source_condition_headers(b.headers_mut(), copy.conditions).map_err(
+            |source| {
+                Self::invalid_request("failed to format copy source condition headers", source)
+            },
+        )?;
 
         let headers = b.headers_mut().clone();
         let url = b.sign(Self::DURATION);
 
         let res = Self::with_signed_headers(self.state.client.put(url), &headers)
             .send()
-            .await?;
-        let res = Self::error_for_status(res).await?;
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::Copy, source))?;
+        let res = Self::error_for_status(
+            res,
+            Operation::Copy,
+            Some(Resource::Object {
+                key: source_key.clone(),
+            }),
+        )
+        .await?;
         let body = res
             .bytes()
             .await
-            .context("failed to read copy response body")?;
-        error_from_success_response_body(&body)?;
+            .map_err(|source| Self::response_error(Operation::Copy, source))?;
+        Self::error_from_success_body(
+            &body,
+            Operation::Copy,
+            Some(Resource::Object {
+                key: source_key.clone(),
+            }),
+        )?;
 
         let fallback = parse_copy_object_result(target_key.clone(), &body)?
             .unwrap_or_else(|| ObjectMeta::new(target_key.clone()));
 
-        self.metadata_after_write(
-            &target_key,
-            fallback,
-            "failed to fetch object metadata after copy",
-        )
-        .await
+        Ok(self
+            .metadata_after_write(
+                &target_key,
+                fallback,
+                "failed to fetch object metadata after copy",
+            )
+            .await?)
     }
 
-    async fn delete(&self, key: &str) -> Result<(), anyhow::Error> {
-        self.delete_object(key).await
+    async fn delete(&self, key: &str) -> ObjStoreResult<()> {
+        self.delete_object(key).await?;
+        Ok(())
     }
 
-    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> ObjStoreResult<ObjectMetaPage> {
         let delim = args.delimiter().unwrap_or_default().to_string();
         let mut list = self.list_objects(args).await?;
         let cursor = list.next_continuation_token.take();
@@ -879,7 +1269,7 @@ impl ObjStore for S3ObjStore {
             .common_prefixes
             .drain(..)
             .map(|p| Ok(p.prefix.trim_end_matches(&delim).to_owned()))
-            .collect::<Result<Vec<String>, anyhow::Error>>()?;
+            .collect::<ObjStoreResult<Vec<String>>>()?;
         let prefixes = if prefixes.is_empty() {
             None
         } else {
@@ -894,7 +1284,7 @@ impl ObjStore for S3ObjStore {
         })
     }
 
-    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage, anyhow::Error> {
+    async fn list_keys(&self, args: ListArgs) -> ObjStoreResult<KeyPage> {
         let list = self.list_objects(args).await?;
         tracing::trace!(?list, "listing keys");
         let items = list.contents.into_iter().map(|o| o.key).collect();
@@ -905,19 +1295,19 @@ impl ObjStore for S3ObjStore {
         })
     }
 
-    async fn delete_prefix(&self, prefix: &str) -> Result<(), anyhow::Error> {
-        self.delete_all(prefix).await
+    async fn delete_prefix(&self, prefix: &str) -> ObjStoreResult<()> {
+        self.delete_all(prefix).await?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use anyhow::bail;
     use http::HeaderMap;
     use objstore::{Conditions, MatchValue, ObjStoreExt};
     use rusty_s3::{Credentials, UrlStyle as RustyUrlStyle};
 
-    use crate::S3ObjStoreConfig;
+    use crate::{S3ObjStoreConfig, util::error_from_success_response_body};
 
     use super::*;
     use base64::Engine;
@@ -932,11 +1322,14 @@ mod tests {
         std::env::var("TEST_STRICT").is_ok()
     }
 
-    fn load_test_config() -> Result<Option<S3ObjStoreConfig>, anyhow::Error> {
+    fn load_test_config() -> ObjStoreResult<Option<S3ObjStoreConfig>> {
         const ENV_VAR: &str = "S3_TEST_URI";
         let Ok(var) = std::env::var(ENV_VAR) else {
             if test_strict() {
-                bail!("missing required environment variable: {ENV_VAR}");
+                return Err(ObjStoreError::InvalidConfig {
+                    message: format!("missing required environment variable: {ENV_VAR}"),
+                    source: None,
+                });
             } else {
                 eprintln!(
                     "skipping s3 tests due to missing config - set TEST_STRICT=1 env var to require the test"
@@ -952,6 +1345,103 @@ mod tests {
     async fn ensure_test_bucket(store: &S3ObjStore) {
         if read_create_bucket() {
             let _ = store.bucket_create().await;
+        }
+    }
+
+    #[test]
+    fn classify_s3_precondition_failed() {
+        let err = S3ObjStore::classify_s3_error(
+            StatusCode::PRECONDITION_FAILED,
+            &HeaderMap::new(),
+            br#"<Error><Code>PreconditionFailed</Code><Message>condition failed</Message></Error>"#,
+            Operation::Put,
+            Some(Resource::Object {
+                key: "existing-key".to_string(),
+            }),
+        );
+
+        match err {
+            ObjStoreError::PreconditionFailed {
+                operation,
+                resource,
+                ..
+            } => {
+                assert_eq!(operation, Operation::Put);
+                assert_eq!(
+                    resource,
+                    Some(Resource::Object {
+                        key: "existing-key".to_string()
+                    })
+                );
+            }
+            other => panic!("expected PreconditionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_s3_permission_denied() {
+        let err = S3ObjStore::classify_s3_error(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new(),
+            br#"<Error><Code>AccessDenied</Code><Message>denied</Message></Error>"#,
+            Operation::List,
+            Some(Resource::Bucket {
+                bucket: "private-bucket".to_string(),
+            }),
+        );
+
+        match err {
+            ObjStoreError::PermissionDenied {
+                operation,
+                resource,
+                ..
+            } => {
+                assert_eq!(operation, Operation::List);
+                assert_eq!(
+                    resource,
+                    Some(Resource::Bucket {
+                        bucket: "private-bucket".to_string()
+                    })
+                );
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_s3_backend_preserves_status_code_and_request_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amz-request-id", "request-123".parse().unwrap());
+        headers.insert("x-amz-id-2", "extended-456".parse().unwrap());
+
+        let err = S3ObjStore::classify_s3_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &headers,
+            br#"<Error><Code>InternalError</Code><Message>failed</Message></Error>"#,
+            Operation::Copy,
+            None,
+        );
+
+        match err {
+            ObjStoreError::Backend {
+                backend,
+                operation,
+                code,
+                status,
+                message,
+                request_id,
+                extended_request_id,
+                ..
+            } => {
+                assert_eq!(backend, S3ObjStore::KIND);
+                assert_eq!(operation, Operation::Copy);
+                assert_eq!(code.as_deref(), Some("InternalError"));
+                assert_eq!(status, Some(500));
+                assert_eq!(message.as_deref(), Some("failed"));
+                assert_eq!(request_id.as_deref(), Some("request-123"));
+                assert_eq!(extended_request_id.as_deref(), Some("extended-456"));
+            }
+            other => panic!("expected Backend, got {other:?}"),
         }
     }
 
@@ -1378,12 +1868,13 @@ mod tests {
         let err = store
             .healthcheck()
             .await
-            .expect_err("missing bucket should fail healthcheck")
-            .to_string();
-        assert!(
-            err.contains("bucket does not exist") || err.contains("404"),
-            "unexpected error: {err}"
-        );
+            .expect_err("missing bucket should fail healthcheck");
+        match err {
+            ObjStoreError::BucketNotFound { bucket, .. } => {
+                assert!(bucket.starts_with("missing-bucket-"));
+            }
+            other => panic!("expected BucketNotFound for missing S3 bucket, got {other:?}"),
+        }
     }
 
     #[tokio::test]

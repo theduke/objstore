@@ -8,15 +8,14 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, bail};
 use bytes::Bytes;
 use futures::{StreamExt as _, TryStreamExt as _};
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
-    Put, UploadUrlArgs, ValueStream,
+    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta,
+    ObjectMetaPage, Operation, Put, Result, UploadUrlArgs, ValueStream,
 };
 use sha2::Digest;
 use url::Url;
@@ -47,14 +46,19 @@ impl FsObjStore {
     /// The kind of this object store (see [`ObjStore::kind`]).
     pub const KIND: &'static str = "objstore.fs";
 
-    pub fn new(config: FsObjStoreConfig) -> Result<Self, anyhow::Error> {
+    pub fn new(config: FsObjStoreConfig) -> Result<Self> {
         let root = config.path.clone();
-        std::fs::create_dir_all(&root).with_context(|| {
-            format!("Could not create fs kvstore directory '{}'", root.display())
+        std::fs::create_dir_all(&root).map_err(|source| ObjStoreError::Io {
+            operation: Operation::Build,
+            source,
         })?;
 
-        let safe_uri = Url::parse(&format!("file://{}", root.display()))
-            .context("Failed to build safe-uri")?;
+        let safe_uri = Url::parse(&format!("file://{}", root.display())).map_err(|source| {
+            ObjStoreError::InvalidConfig {
+                message: "failed to build safe-uri".to_string(),
+                source: Some(source.into()),
+            }
+        })?;
 
         Ok(Self {
             state: Arc::new(State { safe_uri, root }),
@@ -75,6 +79,10 @@ fn meta_from_fs_meta(key: String, fs_meta: std::fs::Metadata) -> ObjectMeta {
     meta
 }
 
+fn io_error(operation: Operation, source: std::io::Error) -> ObjStoreError {
+    ObjStoreError::Io { operation, source }
+}
+
 async fn list_dir_rec(
     path: &Path,
     cursor: Option<&str>,
@@ -83,16 +91,23 @@ async fn list_dir_rec(
     current_path: &str,
     items: &mut Vec<ObjectMeta>,
     directories: &mut Option<Vec<String>>,
-) -> Result<Option<()>, anyhow::Error> {
+) -> Result<Option<()>> {
     let f = async {
         let mut iter = match tokio::fs::read_dir(path).await {
             Ok(iter) => iter,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(io_error(Operation::List, err)),
         };
 
-        while let Some(entry) = iter.next_entry().await? {
-            let meta = entry.metadata().await?;
+        while let Some(entry) = iter
+            .next_entry()
+            .await
+            .map_err(|err| io_error(Operation::List, err))?
+        {
+            let meta = entry
+                .metadata()
+                .await
+                .map_err(|err| io_error(Operation::List, err))?;
             let key = entry.file_name().to_string_lossy().to_string();
 
             if let Some(prefix) = &prefix_filter
@@ -159,7 +174,7 @@ async fn list_dir(
     prefix_filter: Option<&str>,
     current_path: &str,
     flat: bool,
-) -> Result<(Vec<ObjectMeta>, Option<Vec<String>>), anyhow::Error> {
+) -> Result<(Vec<ObjectMeta>, Option<Vec<String>>)> {
     let mut items = Vec::new();
     let mut directories = if flat { None } else { Some(Vec::new()) };
     list_dir_rec(
@@ -197,129 +212,140 @@ impl ObjStore for FsObjStore {
         &self.state.safe_uri
     }
 
-    async fn healthcheck(&self) -> Result<(), anyhow::Error> {
+    async fn healthcheck(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>, anyhow::Error> {
+    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>> {
         let path = self.key_path(key);
         match tokio::fs::metadata(&path).await {
             Ok(meta) => Ok(Some(meta_from_fs_meta(key.to_string(), meta))),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err.into()),
+            Err(err) => Err(io_error(Operation::Meta, err)),
         }
     }
 
-    async fn get(&self, key: &str) -> Result<Option<Bytes>, anyhow::Error> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         let path = self.key_path(key);
         let data = match tokio::fs::read(&path).await {
             Ok(data) => Some(data.into()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(io_error(Operation::Get, err)),
         };
         Ok(data)
     }
 
-    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>, anyhow::Error> {
+    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>> {
         let path = self.key_path(key);
         match tokio::fs::File::open(&path).await {
             Ok(file) => {
                 let stream = tokio_util::io::ReaderStream::new(file)
                     .map_ok(Bytes::from)
-                    .map_err(anyhow::Error::from)
+                    .map_err(|source| ObjStoreError::Io {
+                        operation: Operation::GetStream,
+                        source,
+                    })
                     .boxed();
                 Ok(Some(stream))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err.into()),
+            Err(err) => Err(io_error(Operation::GetStream, err)),
         }
     }
 
-    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>, anyhow::Error> {
+    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {
         let mut f = match tokio::fs::File::open(self.key_path(key)).await {
             Ok(f) => f,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(io_error(Operation::Get, err)),
         };
         let fs_meta = match f.metadata().await {
             Ok(meta) => meta,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(io_error(Operation::Get, err)),
         };
         let mut buf = Vec::with_capacity(fs_meta.len() as usize);
-        f.read_to_end(&mut buf).await?;
+        f.read_to_end(&mut buf)
+            .await
+            .map_err(|err| io_error(Operation::Get, err))?;
 
         let meta = meta_from_fs_meta(key.to_string(), fs_meta);
         Ok(Some((buf.into(), meta)))
     }
 
-    async fn get_stream_with_meta(
-        &self,
-        key: &str,
-    ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error> {
+    async fn get_stream_with_meta(&self, key: &str) -> Result<Option<(ObjectMeta, ValueStream)>> {
         let path = self.key_path(key);
         let f = match tokio::fs::File::open(&path).await {
             Ok(f) => f,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(io_error(Operation::GetStream, err)),
         };
         let fs_meta = match f.metadata().await {
             Ok(meta) => meta,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(io_error(Operation::GetStream, err)),
         };
         let stream = tokio_util::io::ReaderStream::new(f)
             .map_ok(Bytes::from)
-            .map_err(anyhow::Error::from)
+            .map_err(|source| ObjStoreError::Io {
+                operation: Operation::GetStream,
+                source,
+            })
             .boxed();
 
         let meta = meta_from_fs_meta(key.to_string(), fs_meta);
         Ok(Some((meta, stream)))
     }
 
-    async fn generate_download_url(
-        &self,
-        _args: DownloadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_download_url(&self, _args: DownloadUrlArgs) -> Result<Option<url::Url>> {
         Ok(None)
     }
 
-    async fn generate_upload_url(
-        &self,
-        _args: UploadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_upload_url(&self, _args: UploadUrlArgs) -> Result<Option<url::Url>> {
         Ok(None)
     }
 
-    async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_put(&self, put: Put) -> Result<ObjectMeta> {
         let path = self.key_path(&put.key);
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| io_error(Operation::Put, err))?;
         }
 
         match put.data {
             DataSource::Data(value) => {
-                tokio::fs::write(&path, &value).await?;
+                tokio::fs::write(&path, &value)
+                    .await
+                    .map_err(|err| io_error(Operation::Put, err))?;
             }
             DataSource::Stream(sized) => {
                 let mut stream = sized.into_stream();
-                let mut file = tokio::fs::File::create(&path).await?;
+                let mut file = tokio::fs::File::create(&path)
+                    .await
+                    .map_err(|err| io_error(Operation::Put, err))?;
 
                 while let Some(chunk) = stream.next().await {
-                    file.write_all(&chunk?).await?;
+                    file.write_all(&chunk?)
+                        .await
+                        .map_err(|err| io_error(Operation::Put, err))?;
                 }
 
-                file.sync_all().await?;
+                file.sync_all()
+                    .await
+                    .map_err(|err| io_error(Operation::Put, err))?;
             }
         }
 
-        let fs_meta = tokio::fs::metadata(&path).await?;
+        let fs_meta = tokio::fs::metadata(&path)
+            .await
+            .map_err(|err| io_error(Operation::Put, err))?;
         let meta = meta_from_fs_meta(put.key, fs_meta);
 
         Ok(meta)
     }
 
-    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta> {
         let src_path = self.key_path(&copy.source_key);
         let dst_path = self.key_path(&copy.target_key);
         // If requested, ensure destination does not exist
@@ -327,13 +353,25 @@ impl ObjStore for FsObjStore {
         // TODO: conditions support
 
         if let Some(parent) = dst_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| io_error(Operation::Copy, err))?;
         }
         // Perform file copy
-        tokio::fs::copy(&src_path, &dst_path).await?;
+        match tokio::fs::copy(&src_path, &dst_path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ObjStoreError::object_not_found(copy.source_key));
+            }
+            Err(err) => return Err(io_error(Operation::Copy, err)),
+        }
         // Build metadata from filesystem and compute hash
-        let fs_meta = tokio::fs::metadata(&dst_path).await?;
-        let data = tokio::fs::read(&dst_path).await?;
+        let fs_meta = tokio::fs::metadata(&dst_path)
+            .await
+            .map_err(|err| io_error(Operation::Copy, err))?;
+        let data = tokio::fs::read(&dst_path)
+            .await
+            .map_err(|err| io_error(Operation::Copy, err))?;
         let mut meta = meta_from_fs_meta(copy.target_key.clone(), fs_meta);
         // Compute sha256 hash of copied data
         let digest = sha2::Sha256::digest(&data);
@@ -341,13 +379,15 @@ impl ObjStore for FsObjStore {
         Ok(meta)
     }
 
-    async fn delete(&self, key: &str) -> Result<(), anyhow::Error> {
+    async fn delete(&self, key: &str) -> Result<()> {
         let path = self.key_path(key);
-        tokio::fs::remove_file(&path).await?;
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|err| io_error(Operation::Delete, err))?;
         Ok(())
     }
 
-    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage> {
         let limit = args.limit().unwrap_or(10_000) as usize;
 
         // Must compute the prefix as a parent directory.
@@ -365,7 +405,10 @@ impl ObjStore for FsObjStore {
             if delim == "/" {
                 true
             } else {
-                bail!("The fs store only supports '/' as a delimiter");
+                return Err(ObjStoreError::InvalidRequest {
+                    message: "the fs store only supports '/' as a delimiter".to_string(),
+                    source: None,
+                });
             }
         } else {
             false
@@ -381,7 +424,7 @@ impl ObjStore for FsObjStore {
         })
     }
 
-    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage, anyhow::Error> {
+    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage> {
         let meta_items = self.list(args).await?;
         let items = meta_items.items.into_iter().map(|item| item.key).collect();
         let page = KeyPage {
@@ -391,7 +434,7 @@ impl ObjStore for FsObjStore {
         Ok(page)
     }
 
-    async fn list_all_keys(&self, prefix: &str) -> Result<Vec<String>, anyhow::Error> {
+    async fn list_all_keys(&self, prefix: &str) -> Result<Vec<String>> {
         let args = ListArgs::new().with_prefix(prefix).with_limit(u64::MAX);
         let meta_items = self.list(args).await?;
         let keys = meta_items
@@ -402,14 +445,14 @@ impl ObjStore for FsObjStore {
         Ok(keys)
     }
 
-    async fn delete_prefix(&self, prefix: &str) -> Result<(), anyhow::Error> {
+    async fn delete_prefix(&self, prefix: &str) -> Result<()> {
         let path = self.key_path(prefix);
 
         // check if dir or file
         let meta = match tokio::fs::metadata(&path).await {
             Ok(meta) => meta,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(io_error(Operation::DeletePrefix, err)),
         };
 
         let res = if meta.is_dir() {
@@ -420,7 +463,7 @@ impl ObjStore for FsObjStore {
         match res {
             Ok(_) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.into()),
+            Err(err) => Err(io_error(Operation::DeletePrefix, err)),
         }
     }
 }

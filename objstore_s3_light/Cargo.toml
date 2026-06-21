@@ -20,7 +20,6 @@ objstore.workspace = true
 bytes.workspace = true
 time = { workspace = true, features = ["formatting", "parsing"] }
 tokio = { workspace = true, features = ["sync", "rt"] }
-anyhow.workspace = true
 async-trait.workspace = true
 sha2.workspace = true
 futures.workspace = true
