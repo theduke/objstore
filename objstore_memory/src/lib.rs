@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
-    Put, UploadUrlArgs, ValueStream,
+    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta,
+    ObjectMetaPage, Put, Result, UploadUrlArgs, ValueStream,
 };
 use url::Url;
 
@@ -71,11 +71,11 @@ impl ObjStore for MemoryObjStore {
         &self.safe_uri
     }
 
-    async fn healthcheck(&self) -> Result<(), anyhow::Error> {
+    async fn healthcheck(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>, anyhow::Error> {
+    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>> {
         let meta = self
             .state
             .data
@@ -86,7 +86,7 @@ impl ObjStore for MemoryObjStore {
         Ok(meta)
     }
 
-    async fn get(&self, key: &str) -> Result<Option<Bytes>, anyhow::Error> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         let bytes = self
             .state
             .data
@@ -97,7 +97,7 @@ impl ObjStore for MemoryObjStore {
         Ok(bytes)
     }
 
-    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>, anyhow::Error> {
+    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>> {
         if let Some(value) = self.get(key).await? {
             let stream = futures::stream::once(async move { Ok(value) });
             Ok(Some(Box::pin(stream)))
@@ -106,17 +106,14 @@ impl ObjStore for MemoryObjStore {
         }
     }
 
-    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>, anyhow::Error> {
+    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {
         match self.state.data.read().await.get(key).cloned() {
             Some(item) => Ok(Some((item.data, item.meta))),
             None => Ok(None),
         }
     }
 
-    async fn get_stream_with_meta(
-        &self,
-        key: &str,
-    ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error> {
+    async fn get_stream_with_meta(&self, key: &str) -> Result<Option<(ObjectMeta, ValueStream)>> {
         if let Some((data, meta)) = self.get_with_meta(key).await? {
             let stream = futures::stream::once(async move { Ok(data) });
             Ok(Some((meta, Box::pin(stream))))
@@ -125,21 +122,15 @@ impl ObjStore for MemoryObjStore {
         }
     }
 
-    async fn generate_download_url(
-        &self,
-        _args: DownloadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_download_url(&self, _args: DownloadUrlArgs) -> Result<Option<url::Url>> {
         Ok(None)
     }
 
-    async fn generate_upload_url(
-        &self,
-        _args: UploadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_upload_url(&self, _args: UploadUrlArgs) -> Result<Option<url::Url>> {
         Ok(None)
     }
 
-    async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_put(&self, put: Put) -> Result<ObjectMeta> {
         use sha2::Digest;
 
         let value = match put.data {
@@ -173,7 +164,7 @@ impl ObjStore for MemoryObjStore {
         Ok(meta)
     }
 
-    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta> {
         // Load source item
         let item = {
             let data_read = self.state.data.read().await;
@@ -184,7 +175,7 @@ impl ObjStore for MemoryObjStore {
             data_read
                 .get(&copy.source_key)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("source key '{}' not found", copy.source_key))?
+                .ok_or_else(|| ObjStoreError::object_not_found(copy.source_key.clone()))?
         };
         // Create new metadata for destination
         let mut meta = item.meta.clone();
@@ -203,12 +194,12 @@ impl ObjStore for MemoryObjStore {
         Ok(meta)
     }
 
-    async fn delete(&self, key: &str) -> Result<(), anyhow::Error> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.state.data.write().await.remove(key);
         Ok(())
     }
 
-    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage> {
         let data = self.state.data.read().await;
 
         let limit = args.limit().unwrap_or(1_000) as usize;
@@ -241,7 +232,7 @@ impl ObjStore for MemoryObjStore {
         })
     }
 
-    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage, anyhow::Error> {
+    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage> {
         let items = self.list(args).await?;
         let page = KeyPage {
             items: items
@@ -254,7 +245,7 @@ impl ObjStore for MemoryObjStore {
         Ok(page)
     }
 
-    async fn delete_prefix(&self, prefix: &str) -> Result<(), anyhow::Error> {
+    async fn delete_prefix(&self, prefix: &str) -> Result<()> {
         self.state
             .data
             .write()

@@ -1133,7 +1133,6 @@ dependencies = [
 name = "objstore"
 version = "0.1.0-alpha.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "bytes",
  "futures",
@@ -1165,7 +1164,6 @@ dependencies = [
 name = "objstore_fs"
 version = "0.1.0-alpha.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "bytes",
  "futures",
@@ -1184,7 +1182,6 @@ dependencies = [
 name = "objstore_logfs"
 version = "0.1.0-alpha.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64",
  "bytes",
@@ -1208,7 +1205,6 @@ dependencies = [
 name = "objstore_memory"
 version = "0.1.0-alpha.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "bytes",
  "futures",
@@ -1224,7 +1220,6 @@ dependencies = [
 name = "objstore_s3_light"
 version = "0.1.0-alpha.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64",
  "bytes",
@@ -1251,7 +1246,6 @@ dependencies = [
 name = "objstore_test"
 version = "0.1.0-alpha.1"
 dependencies = [
- "anyhow",
  "bytes",
  "futures",
  "md5",

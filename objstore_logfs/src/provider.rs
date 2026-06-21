@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Context as _;
+use objstore::{ObjStoreError, Result};
 
 use crate::{LogFsObjStore, LogFsObjStoreConfig};
 
@@ -26,9 +26,12 @@ impl objstore::ObjStoreProvider for LogFsProvider {
         LogFsObjStoreConfig::URI_SCHEME
     }
 
-    fn build(&self, url: &url::Url) -> Result<objstore::DynObjStore, anyhow::Error> {
-        let config = LogFsObjStoreConfig::from_url(url)
-            .context("failed to parse logfs object store configuration from URI")?;
+    fn build(&self, url: &url::Url) -> Result<objstore::DynObjStore> {
+        let config =
+            LogFsObjStoreConfig::from_url(url).map_err(|source| ObjStoreError::InvalidConfig {
+                message: "failed to parse logfs object store configuration from URI".to_string(),
+                source: Some(source.into()),
+            })?;
         let store = LogFsObjStore::new(config)?;
         Ok(Arc::new(store) as objstore::DynObjStore)
     }

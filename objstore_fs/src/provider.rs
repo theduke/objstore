@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use objstore::{ObjStoreError, Result};
+
 #[derive(Clone, Debug, Default)]
 pub struct FsProvider {
     _private: (),
@@ -22,13 +24,16 @@ impl objstore::ObjStoreProvider for FsProvider {
         "fs"
     }
 
-    fn build(&self, url: &url::Url) -> Result<objstore::DynObjStore, anyhow::Error> {
+    fn build(&self, url: &url::Url) -> Result<objstore::DynObjStore> {
         if url.scheme() != self.url_scheme() {
-            return Err(anyhow::anyhow!(
-                "Invalid scheme: expected '{}', got '{}'",
-                self.url_scheme(),
-                url.scheme()
-            ));
+            return Err(ObjStoreError::InvalidConfig {
+                message: format!(
+                    "invalid scheme: expected '{}', got '{}'",
+                    self.url_scheme(),
+                    url.scheme()
+                ),
+                source: None,
+            });
         }
 
         let config = crate::FsObjStoreConfig {

@@ -1,6 +1,5 @@
 use std::{collections::BTreeSet, io::Write as _, sync::Arc};
 
-use anyhow::anyhow;
 use bytes::Bytes;
 use futures::StreamExt;
 use logfs::{Journal2, KeyMeta, LogFs, LogFsError};
@@ -11,8 +10,8 @@ use url::Url;
 use sha2::Digest;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage,
-    Put, UploadUrlArgs, ValueStream,
+    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta,
+    ObjectMetaPage, Operation, Put, Result, UploadUrlArgs, ValueStream,
 };
 
 use crate::LogFsObjStoreConfig;
@@ -38,7 +37,7 @@ impl std::fmt::Debug for LogFsObjStore {
 impl LogFsObjStore {
     pub const KIND: &'static str = "objstore.logfs";
 
-    pub fn new(config: LogFsObjStoreConfig) -> Result<Self, anyhow::Error> {
+    pub fn new(config: LogFsObjStoreConfig) -> Result<Self> {
         let log_config = config.to_logfs_config();
         dbg!(&log_config);
         let log = LogFs::open(log_config).map_err(map_logfs_err)?;
@@ -66,7 +65,7 @@ impl LogFsObjStore {
         obj
     }
 
-    async fn with_log<F, R>(&self, func: F) -> Result<R, anyhow::Error>
+    async fn with_log<F, R>(&self, func: F) -> Result<R>
     where
         F: FnOnce(LogFs<Journal2>) -> Result<R, LogFsError> + Send + 'static,
         R: Send + 'static,
@@ -74,14 +73,24 @@ impl LogFsObjStore {
         let log = self.state.log.clone();
         task::spawn_blocking(move || func(log))
             .await
-            .map_err(|err| anyhow!("logfs blocking task failed: {err}"))?
+            .map_err(|source| ObjStoreError::Backend {
+                backend: Self::KIND,
+                operation: Operation::Unknown,
+                resource: None,
+                code: None,
+                status: None,
+                message: Some("logfs blocking task failed".to_string()),
+                request_id: None,
+                extended_request_id: None,
+                source: Some(source.into()),
+            })?
             .map_err(map_logfs_err)
     }
 
     async fn list_raw(
         &self,
         args: ListArgs,
-    ) -> Result<(Vec<ObjectMeta>, Option<String>, Option<Vec<String>>), anyhow::Error> {
+    ) -> Result<(Vec<ObjectMeta>, Option<String>, Option<Vec<String>>)> {
         let prefix = args.prefix().map(|p| p.to_string()).unwrap_or_default();
         let limit = args.limit().unwrap_or(1_000) as usize;
         let cursor = args.cursor().map(|c| c.to_string());
@@ -162,7 +171,7 @@ impl LogFsObjStore {
         .await
     }
 
-    async fn spawn_reader_stream(&self, key: String) -> Result<Option<ValueStream>, anyhow::Error> {
+    async fn spawn_reader_stream(&self, key: String) -> Result<Option<ValueStream>> {
         let log = self.state.log.clone();
         let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, LogFsError>>();
         let (tx, rx) = mpsc::channel::<Result<Bytes, LogFsError>>(8);
@@ -188,10 +197,10 @@ impl LogFsObjStore {
             }
         });
 
-        match ready_rx
-            .await
-            .map_err(|err| anyhow!("logfs reader coordination failed: {err}"))?
-        {
+        match ready_rx.await.map_err(|source| ObjStoreError::Internal {
+            message: "logfs reader coordination failed".to_string(),
+            source: Some(source.into()),
+        })? {
             Ok(true) => {
                 let stream = futures::stream::unfold(rx, |mut rx| async {
                     rx.recv()
@@ -216,7 +225,7 @@ impl ObjStore for LogFsObjStore {
         &self.state.safe_uri
     }
 
-    async fn healthcheck(&self) -> Result<(), anyhow::Error> {
+    async fn healthcheck(&self) -> Result<()> {
         self.with_log(|log| {
             log.superblock()?;
             Ok(())
@@ -224,7 +233,7 @@ impl ObjStore for LogFsObjStore {
         .await
     }
 
-    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>, anyhow::Error> {
+    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>> {
         let key = key.to_string();
         self.with_log(move |log| match log.get_meta(&key)? {
             Some(meta) => Ok(Some(Self::key_meta_to_object_meta(key, meta))),
@@ -233,17 +242,17 @@ impl ObjStore for LogFsObjStore {
         .await
     }
 
-    async fn get(&self, key: &str) -> Result<Option<Bytes>, anyhow::Error> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         let key = key.to_string();
         let data = self.with_log(move |log| log.get(&key)).await?;
         Ok(data.map(Bytes::from))
     }
 
-    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>, anyhow::Error> {
+    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>> {
         self.spawn_reader_stream(key.to_string()).await
     }
 
-    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>, anyhow::Error> {
+    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {
         let key = key.to_string();
         self.with_log(move |log| {
             let data = match log.get(&key)? {
@@ -259,10 +268,7 @@ impl ObjStore for LogFsObjStore {
         .await
     }
 
-    async fn get_stream_with_meta(
-        &self,
-        key: &str,
-    ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error> {
+    async fn get_stream_with_meta(&self, key: &str) -> Result<Option<(ObjectMeta, ValueStream)>> {
         if let Some(meta) = self.meta(key).await?
             && let Some(stream) = self.get_stream(key).await?
         {
@@ -271,21 +277,15 @@ impl ObjStore for LogFsObjStore {
         Ok(None)
     }
 
-    async fn generate_download_url(
-        &self,
-        _args: DownloadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_download_url(&self, _args: DownloadUrlArgs) -> Result<Option<url::Url>> {
         Ok(None)
     }
 
-    async fn generate_upload_url(
-        &self,
-        _args: UploadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_upload_url(&self, _args: UploadUrlArgs) -> Result<Option<url::Url>> {
         Ok(None)
     }
 
-    async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_put(&self, put: Put) -> Result<ObjectMeta> {
         let key = put.key.clone();
         match put.data {
             DataSource::Data(bytes) => {
@@ -325,21 +325,32 @@ impl ObjStore for LogFsObjStore {
 
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk?;
-                    tx.send(chunk)
-                        .await
-                        .map_err(|_| anyhow!("logfs writer task dropped receiver"))?;
+                    tx.send(chunk).await.map_err(|_| ObjStoreError::Internal {
+                        message: "logfs writer task dropped receiver".to_string(),
+                        source: None,
+                    })?;
                 }
                 drop(tx);
 
                 writer_handle
                     .await
-                    .map_err(|err| anyhow!("logfs writer task failed: {err}"))?
+                    .map_err(|source| ObjStoreError::Backend {
+                        backend: Self::KIND,
+                        operation: Operation::Put,
+                        resource: None,
+                        code: None,
+                        status: None,
+                        message: Some("logfs writer task failed".to_string()),
+                        request_id: None,
+                        extended_request_id: None,
+                        source: Some(source.into()),
+                    })?
                     .map_err(map_logfs_err)
             }
         }
     }
 
-    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta> {
         self.with_log(move |log| {
             let data = log
                 .get(&copy.source_key)?
@@ -361,7 +372,7 @@ impl ObjStore for LogFsObjStore {
         .await
     }
 
-    async fn delete(&self, key: &str) -> Result<(), anyhow::Error> {
+    async fn delete(&self, key: &str) -> Result<()> {
         let key = key.to_string();
         self.with_log(move |log| {
             log.remove(&key)?;
@@ -370,7 +381,7 @@ impl ObjStore for LogFsObjStore {
         .await
     }
 
-    async fn delete_prefix(&self, prefix: &str) -> Result<(), anyhow::Error> {
+    async fn delete_prefix(&self, prefix: &str) -> Result<()> {
         let prefix = prefix.to_string();
         self.with_log(move |log| {
             log.remove_prefix(&prefix)?;
@@ -379,7 +390,7 @@ impl ObjStore for LogFsObjStore {
         .await
     }
 
-    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage> {
         let (items, next_cursor, prefixes) = self.list_raw(args).await?;
         Ok(ObjectMetaPage {
             items,
@@ -388,7 +399,7 @@ impl ObjStore for LogFsObjStore {
         })
     }
 
-    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage, anyhow::Error> {
+    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage> {
         let page = self.list(args).await?;
         Ok(KeyPage {
             next_cursor: page.next_cursor,
@@ -397,8 +408,24 @@ impl ObjStore for LogFsObjStore {
     }
 }
 
-fn map_logfs_err(err: LogFsError) -> anyhow::Error {
-    anyhow!(err)
+fn map_logfs_err(source: LogFsError) -> ObjStoreError {
+    match source {
+        LogFsError::NotFound { path } => ObjStoreError::ObjectNotFound {
+            key: path,
+            source: None,
+        },
+        source => ObjStoreError::Backend {
+            backend: LogFsObjStore::KIND,
+            operation: Operation::Unknown,
+            resource: None,
+            code: None,
+            status: None,
+            message: Some(source.to_string()),
+            request_id: None,
+            extended_request_id: None,
+            source: Some(source.into()),
+        },
+    }
 }
 
 #[cfg(test)]

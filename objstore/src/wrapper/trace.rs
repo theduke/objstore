@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use crate::{
-    Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage, Put,
+    Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage, Put, Result,
     UploadUrlArgs, ValueStream,
 };
 
@@ -43,7 +43,7 @@ where
         self.inner.safe_uri()
     }
 
-    async fn healthcheck(&self) -> Result<(), anyhow::Error> {
+    async fn healthcheck(&self) -> Result<()> {
         tracing::debug!("Performing healthcheck on object store: {}", self.kind());
         match self.inner.healthcheck().await {
             Ok(_) => {
@@ -57,7 +57,7 @@ where
         }
     }
 
-    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>, anyhow::Error> {
+    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>> {
         match self.inner.meta(key).await {
             Ok(meta) => {
                 tracing::trace!(store = &self.name, key, ?meta, "get_meta");
@@ -70,7 +70,7 @@ where
         }
     }
 
-    async fn get(&self, key: &str) -> Result<Option<Bytes>, anyhow::Error> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         match self.inner.get(key).await {
             Ok(Some(value)) => {
                 tracing::trace!(store = &self.name, key, "get::ok");
@@ -87,7 +87,7 @@ where
         }
     }
 
-    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>, anyhow::Error> {
+    async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>> {
         match self.inner.get_stream(key).await {
             Ok(Some(value)) => {
                 tracing::trace!(store = &self.name, key, "get_stream::ok");
@@ -104,7 +104,7 @@ where
         }
     }
 
-    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>, anyhow::Error> {
+    async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {
         match self.inner.get_with_meta(key).await {
             Ok(Some((value, meta))) => {
                 tracing::trace!(store = &self.name, key, ?meta, "get_with_meta::ok");
@@ -121,10 +121,7 @@ where
         }
     }
 
-    async fn get_stream_with_meta(
-        &self,
-        key: &str,
-    ) -> Result<Option<(ObjectMeta, ValueStream)>, anyhow::Error> {
+    async fn get_stream_with_meta(&self, key: &str) -> Result<Option<(ObjectMeta, ValueStream)>> {
         match self.inner.get_stream_with_meta(key).await {
             Ok(Some((meta, value))) => {
                 tracing::trace!(store = &self.name, key, ?meta, "get_stream_with_meta::ok");
@@ -140,10 +137,7 @@ where
             }
         }
     }
-    async fn generate_download_url(
-        &self,
-        args: DownloadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_download_url(&self, args: DownloadUrlArgs) -> Result<Option<url::Url>> {
         match self.inner.generate_download_url(args).await {
             Ok(Some(url)) => {
                 tracing::trace!(store = &self.name, %url, "generate_download_url::ok");
@@ -163,10 +157,7 @@ where
         }
     }
 
-    async fn generate_upload_url(
-        &self,
-        args: UploadUrlArgs,
-    ) -> Result<Option<url::Url>, anyhow::Error> {
+    async fn generate_upload_url(&self, args: UploadUrlArgs) -> Result<Option<url::Url>> {
         match self.inner.generate_upload_url(args).await {
             Ok(Some(url)) => {
                 tracing::trace!(store = &self.name, %url, "generate_upload_url::ok");
@@ -186,7 +177,7 @@ where
         }
     }
 
-    async fn send_put(&self, put: Put) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_put(&self, put: Put) -> Result<ObjectMeta> {
         let key = put.key.clone();
         tracing::trace!(store = &self.name, key, "put::start");
         match self.inner.send_put(put).await {
@@ -201,7 +192,7 @@ where
         }
     }
 
-    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta, anyhow::Error> {
+    async fn send_copy(&self, copy: Copy) -> Result<ObjectMeta> {
         tracing::trace!(
             store = &self.name,
             src = &copy.source_key,
@@ -220,7 +211,7 @@ where
         }
     }
 
-    async fn delete(&self, key: &str) -> Result<(), anyhow::Error> {
+    async fn delete(&self, key: &str) -> Result<()> {
         tracing::trace!(store = &self.name, key, "delete::start");
         match self.inner.delete(key).await {
             Ok(_) => {
@@ -234,7 +225,7 @@ where
         }
     }
 
-    async fn delete_prefix(&self, prefix: &str) -> Result<(), anyhow::Error> {
+    async fn delete_prefix(&self, prefix: &str) -> Result<()> {
         tracing::trace!(store = &self.name, prefix, "delete_prefix::start");
         match self.inner.delete_prefix(prefix).await {
             Ok(_) => {
@@ -248,7 +239,7 @@ where
         }
     }
 
-    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage, anyhow::Error> {
+    async fn list(&self, args: ListArgs) -> Result<ObjectMetaPage> {
         match self.inner.list(args).await {
             Ok(page) => {
                 tracing::trace!(store = &self.name, ?page, "list::ok");
@@ -261,7 +252,7 @@ where
         }
     }
 
-    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage, anyhow::Error> {
+    async fn list_keys(&self, args: ListArgs) -> Result<KeyPage> {
         match self.inner.list_keys(args).await {
             Ok(page) => {
                 tracing::trace!(store = &self.name, ?page, "list_keys::ok");

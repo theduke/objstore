@@ -1,9 +1,8 @@
 use std::borrow::Cow;
 
-use anyhow::{Context as _, anyhow};
 use base64::Engine as _;
 use http::HeaderMap;
-use objstore::{Conditions, ObjectMeta};
+use objstore::{Conditions, ObjStoreError, ObjectMeta, Result};
 use quick_xml::de::from_reader;
 use serde::Deserialize;
 use time::OffsetDateTime;
@@ -17,21 +16,27 @@ pub(crate) fn insert_signed_header<'a>(
 }
 
 /// See <https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html>
-pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMeta, anyhow::Error> {
+pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMeta> {
     let last_modified = if let Some(v) = headers.get(http::header::LAST_MODIFIED) {
-        let raw = v.to_str().with_context(|| {
-            format!(
-                "invalid last-modified header: {}",
-                String::from_utf8_lossy(v.as_bytes()),
-            )
-        })?;
+        let raw = v
+            .to_str()
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: format!(
+                    "invalid last-modified header: {}",
+                    String::from_utf8_lossy(v.as_bytes())
+                ),
+                source: Some(source.into()),
+            })?;
 
-        OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc2822).with_context(
-            || {
-                format!(
+        OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc2822).map_err(
+            |source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: format!(
                     "failed to parse last-modified header: '{}'",
-                    String::from_utf8_lossy(v.as_bytes()),
-                )
+                    String::from_utf8_lossy(v.as_bytes())
+                ),
+                source: Some(source.into()),
             },
         )?
     } else {
@@ -41,9 +46,17 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
 
     let size = if let Some(v) = headers.get(http::header::CONTENT_LENGTH) {
         v.to_str()
-            .context("invalid content-length header")?
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: "invalid content-length header".to_string(),
+                source: Some(source.into()),
+            })?
             .parse::<u64>()
-            .context("invalid content-length header")?
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: "invalid content-length header".to_string(),
+                source: Some(source.into()),
+            })?
     } else {
         tracing::trace!("missing content-length header in response headers");
         0
@@ -52,7 +65,11 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
     let etag = if let Some(v) = headers.get(http::header::ETAG) {
         let v = v
             .to_str()
-            .context("invalid etag header")?
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: "invalid etag header".to_string(),
+                source: Some(source.into()),
+            })?
             .trim_matches('"')
             .trim()
             .to_string();
@@ -61,7 +78,7 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
         None
     };
 
-    let mut meta = ObjectMeta::new(key);
+    let mut meta = ObjectMeta::new(key.clone());
     meta.etag = etag;
     meta.size = Some(size);
     meta.created_at = None;
@@ -70,16 +87,30 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
     if let Some(v) = headers.get(http::header::CONTENT_TYPE) {
         let ct = v
             .to_str()
-            .context("invalid content-type header")?
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: "invalid content-type header".to_string(),
+                source: Some(source.into()),
+            })?
             .to_string();
         meta.mime_type = Some(ct);
     }
     // Extract MD5 hash from Content-MD5 header (base64-encoded)
     if let Some(v) = headers.get("Content-MD5") {
-        let raw = v.to_str().context("invalid content-md5 header")?;
+        let raw = v
+            .to_str()
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: "invalid content-md5 header".to_string(),
+                source: Some(source.into()),
+            })?;
         let bytes = base64::prelude::BASE64_STANDARD
             .decode(raw)
-            .context("invalid base64 content-md5 header")?;
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: "invalid base64 content-md5 header".to_string(),
+                source: Some(source.into()),
+            })?;
         if bytes.len() == 16 {
             let mut arr = [0u8; 16];
             arr.copy_from_slice(&bytes);
@@ -90,12 +121,23 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
     }
     // Extract SHA256 hash from x-amz-meta-sha256 header (hex-encoded)
     if let Some(v) = headers.get("x-amz-meta-sha256") {
-        let raw = v.to_str().context("invalid x-amz-meta-sha256 header")?;
+        let raw = v
+            .to_str()
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: "invalid x-amz-meta-sha256 header".to_string(),
+                source: Some(source.into()),
+            })?;
         if raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
             let mut arr = [0u8; 32];
             for i in 0..32 {
-                arr[i] = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
-                    .context("invalid hex in x-amz-meta-sha256 header")?;
+                arr[i] = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).map_err(|source| {
+                    ObjStoreError::InvalidMetadata {
+                        key: key.clone(),
+                        message: "invalid hex in x-amz-meta-sha256 header".to_string(),
+                        source: Some(source.into()),
+                    }
+                })?;
             }
             meta.hash_sha256 = Some(arr);
         } else {
@@ -106,27 +148,48 @@ pub fn parse_object_headers(key: String, headers: &HeaderMap) -> Result<ObjectMe
     Ok(meta)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename = "Error")]
-struct S3ErrorResponse {
+pub struct S3ErrorResponse {
     #[serde(rename = "Code")]
-    code: Option<String>,
+    pub code: Option<String>,
     #[serde(rename = "Message")]
-    message: Option<String>,
+    pub message: Option<String>,
+    #[serde(rename = "RequestId")]
+    pub request_id: Option<String>,
+    #[serde(rename = "HostId")]
+    pub extended_request_id: Option<String>,
 }
 
-pub fn error_from_success_response_body(body: &[u8]) -> Result<(), anyhow::Error> {
+pub fn parse_s3_error_response(body: &[u8]) -> Option<S3ErrorResponse> {
     let Ok(err) = from_reader::<_, S3ErrorResponse>(body) else {
-        return Ok(());
+        return None;
     };
 
     if err.code.is_none() && err.message.is_none() {
-        return Ok(());
+        return None;
     }
 
-    let code = err.code.as_deref().unwrap_or("Unknown");
-    let message = err.message.as_deref().unwrap_or("S3 returned an error");
-    Err(anyhow!("S3 request failed: {code}: {message}"))
+    Some(err)
+}
+
+#[cfg(test)]
+pub fn error_from_success_response_body(body: &[u8]) -> Result<()> {
+    let Some(err) = parse_s3_error_response(body) else {
+        return Ok(());
+    };
+
+    Err(ObjStoreError::Backend {
+        backend: "objstore.s3-light",
+        operation: objstore::Operation::Unknown,
+        resource: None,
+        code: err.code.clone(),
+        status: None,
+        message: err.message.clone(),
+        request_id: err.request_id,
+        extended_request_id: err.extended_request_id,
+        source: None,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,10 +201,7 @@ struct CopyObjectResult {
     last_modified: Option<String>,
 }
 
-pub fn parse_copy_object_result(
-    key: String,
-    body: &[u8],
-) -> Result<Option<ObjectMeta>, anyhow::Error> {
+pub fn parse_copy_object_result(key: String, body: &[u8]) -> Result<Option<ObjectMeta>> {
     let Ok(result) = from_reader::<_, CopyObjectResult>(body) else {
         return Ok(None);
     };
@@ -150,7 +210,7 @@ pub fn parse_copy_object_result(
         return Ok(None);
     }
 
-    let mut meta = ObjectMeta::new(key);
+    let mut meta = ObjectMeta::new(key.clone());
     meta.etag = result
         .etag
         .map(|etag| etag.trim_matches('"').trim().to_string());
@@ -161,7 +221,11 @@ pub fn parse_copy_object_result(
                 &raw,
                 &time::format_description::well_known::Iso8601::DEFAULT,
             )
-            .with_context(|| format!("failed to parse copy LastModified value: '{raw}'"))
+            .map_err(|source| ObjStoreError::InvalidMetadata {
+                key: key.clone(),
+                message: format!("failed to parse copy LastModified value: '{raw}'"),
+                source: Some(source.into()),
+            })
         })
         .transpose()?;
 
@@ -247,7 +311,7 @@ pub fn apply_condition_headers(
 pub fn apply_copy_source_condition_headers(
     headers: &mut rusty_s3::Map,
     mut conditions: Conditions,
-) -> anyhow::Result<()> {
+) -> std::result::Result<(), time::error::Format> {
     conditions.sanitize();
 
     if let Some(if_match) = &conditions.if_match {
@@ -256,9 +320,10 @@ pub fn apply_copy_source_condition_headers(
                 insert_signed_header(headers, "x-amz-copy-source-if-match", "*");
             }
             objstore::MatchValue::Tags(tags) => {
-                if tags.is_empty() {
-                    return Err(anyhow!("if-match tags cannot be empty due to sanitize()"));
-                }
+                assert!(
+                    !tags.is_empty(),
+                    "if-match tags cannot be empty due to sanitize()"
+                );
 
                 let mut value = String::new();
                 for (index, tag) in tags.iter().enumerate() {
@@ -279,11 +344,10 @@ pub fn apply_copy_source_condition_headers(
                 insert_signed_header(headers, "x-amz-copy-source-if-none-match", "*");
             }
             objstore::MatchValue::Tags(tags) => {
-                if tags.is_empty() {
-                    return Err(anyhow!(
-                        "if-none-match tags cannot be empty due to sanitize()"
-                    ));
-                }
+                assert!(
+                    !tags.is_empty(),
+                    "if-none-match tags cannot be empty due to sanitize()"
+                );
 
                 let mut value = String::new();
                 for (index, tag) in tags.iter().enumerate() {

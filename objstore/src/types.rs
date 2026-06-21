@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use time::OffsetDateTime;
 
+use crate::Result;
+
 /// Byte stream.
-pub type ValueStream = futures::stream::BoxStream<'static, Result<Bytes, anyhow::Error>>;
+pub type ValueStream = futures::stream::BoxStream<'static, Result<Bytes>>;
 
 /// A byte stream with an optional known length.
 ///
@@ -58,10 +60,10 @@ impl std::fmt::Debug for SizedValueStream {
 }
 
 /// Stream of key-name pages (as returned by `list_keys`).
-pub type KeyStream<'a> = futures::stream::BoxStream<'a, Result<KeyPage, anyhow::Error>>;
+pub type KeyStream<'a> = futures::stream::BoxStream<'a, Result<KeyPage>>;
 
 /// Stream of metadata pages (as returned by `list`).
-pub type MetaStream = futures::stream::BoxStream<'static, Result<ObjectMetaPage, anyhow::Error>>;
+pub type MetaStream = futures::stream::BoxStream<'static, Result<ObjectMetaPage>>;
 
 /// Object metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
