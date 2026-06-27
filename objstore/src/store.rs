@@ -155,9 +155,10 @@ pub trait ObjStore: Send + Sync + std::fmt::Debug {
             Ok(Some(data)) => {
                 let jd = &mut serde_json::Deserializer::from_slice(&data);
                 let out = serde_path_to_error::deserialize(jd).map_err(|source| {
-                    ObjStoreError::JsonContentDeserialization {
+                    ObjStoreError::ContentDeserialization {
                         key: key.to_string(),
-                        source: Box::new(source),
+                        format: "json".to_string(),
+                        source: Some(Box::new(source)),
                     }
                 })?;
 
@@ -307,9 +308,10 @@ impl ObjStore for DynObjStore {
             Ok(Some(data)) => {
                 let jd = &mut serde_json::Deserializer::from_slice(&data);
                 let out = serde_path_to_error::deserialize(jd).map_err(|source| {
-                    ObjStoreError::JsonContentDeserialization {
+                    ObjStoreError::ContentDeserialization {
                         key: key.to_string(),
-                        source: Box::new(source),
+                        format: "json".to_string(),
+                        source: Some(Box::new(source)),
                     }
                 })?;
 

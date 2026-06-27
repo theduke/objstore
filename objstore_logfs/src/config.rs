@@ -122,7 +122,7 @@ impl LogFsObjStoreConfig {
             std::env::current_dir()
                 .map_err(|source| ObjStoreError::Io {
                     operation: objstore::Operation::Build,
-                    source,
+                    source: Some(source.into()),
                 })?
                 .join(&self.path)
         };

@@ -77,7 +77,7 @@ impl S3ObjStore {
         } else {
             ObjStoreError::Dispatch {
                 operation,
-                source: source.into(),
+                source: Some(source.into()),
             }
         }
     }
@@ -88,7 +88,7 @@ impl S3ObjStore {
     ) -> ObjStoreError {
         ObjStoreError::Response {
             operation,
-            source: source.into(),
+            source: Some(source.into()),
         }
     }
 
@@ -164,6 +164,7 @@ impl S3ObjStore {
             .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
         Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::Put,
             Some(Resource::Bucket {
                 bucket: self.state.bucket.name().to_string(),
@@ -227,6 +228,7 @@ impl S3ObjStore {
         status: StatusCode,
         headers: &http::HeaderMap,
         body: &[u8],
+        bucket: &str,
         operation: Operation,
         resource: Option<Resource>,
     ) -> ObjStoreError {
@@ -258,8 +260,27 @@ impl S3ObjStore {
                     .map(str::to_string)
             });
 
+        match code.as_deref() {
+            Some("NoSuchBucket") => {
+                return ObjStoreError::BucketNotFound {
+                    bucket: bucket.to_string(),
+                    source: None,
+                };
+            }
+            Some("NoSuchKey" | "NotFound") => {
+                if let Some(Resource::Object { key }) = resource.clone() {
+                    return ObjStoreError::ObjectNotFound { key, source: None };
+                }
+            }
+            _ => {}
+        }
+
         match status {
-            StatusCode::UNAUTHORIZED => ObjStoreError::Unauthenticated { source: None },
+            StatusCode::UNAUTHORIZED => ObjStoreError::Unauthenticated {
+                operation,
+                resource,
+                source: None,
+            },
             StatusCode::FORBIDDEN => ObjStoreError::PermissionDenied {
                 operation,
                 resource,
@@ -334,6 +355,7 @@ impl S3ObjStore {
 
     async fn error_for_status(
         res: reqwest::Response,
+        bucket: &str,
         operation: Operation,
         resource: Option<Resource>,
     ) -> ObjStoreResult<reqwest::Response> {
@@ -347,7 +369,7 @@ impl S3ObjStore {
                 .await
                 .map_err(|source| Self::response_error(operation, source))?;
             Err(Self::classify_s3_error(
-                status, &headers, &body, operation, resource,
+                status, &headers, &body, bucket, operation, resource,
             ))
         }
     }
@@ -390,6 +412,7 @@ impl S3ObjStore {
         }
         Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::Healthcheck,
             Some(Resource::Bucket {
                 bucket: self.state.bucket.name().to_string(),
@@ -465,6 +488,7 @@ impl S3ObjStore {
         }
         let res = Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::Meta,
             Some(Resource::Object {
                 key: key.to_string(),
@@ -502,6 +526,7 @@ impl S3ObjStore {
         }
         let res = Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::Get,
             Some(Resource::Object {
                 key: key.to_string(),
@@ -618,6 +643,7 @@ impl S3ObjStore {
             .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
         let res = Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::Put,
             Some(Resource::Object {
                 key: put.key.clone(),
@@ -670,6 +696,7 @@ impl S3ObjStore {
             .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
         let res = Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::Put,
             Some(Resource::Object {
                 key: put.key.clone(),
@@ -731,6 +758,7 @@ impl S3ObjStore {
             .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
         let resp = Self::error_for_status(
             resp,
+            self.state.bucket.name(),
             Operation::Put,
             Some(Resource::Object {
                 key: put.key.clone(),
@@ -816,6 +844,7 @@ impl S3ObjStore {
                     .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
                 let res = Self::error_for_status(
                     res,
+                    self.state.bucket.name(),
                     Operation::Put,
                     Some(Resource::Object { key: key.clone() }),
                 )
@@ -862,6 +891,7 @@ impl S3ObjStore {
                 .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
             let res = Self::error_for_status(
                 res,
+                self.state.bucket.name(),
                 Operation::Put,
                 Some(Resource::Object { key: key.clone() }),
             )
@@ -909,6 +939,7 @@ impl S3ObjStore {
             .map_err(|source| Self::dispatch_error(Operation::Put, source))?;
         let resp = Self::error_for_status(
             resp,
+            self.state.bucket.name(),
             Operation::Put,
             Some(Resource::Object { key: key.clone() }),
         )
@@ -951,6 +982,7 @@ impl S3ObjStore {
             .map_err(|source| Self::dispatch_error(Operation::Delete, source))?;
         Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::Delete,
             Some(Resource::Object {
                 key: key.to_string(),
@@ -998,6 +1030,7 @@ impl S3ObjStore {
             .map_err(|source| Self::dispatch_error(Operation::List, source))?;
         let res = Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::List,
             prefix.map(|prefix| Resource::Prefix { prefix }),
         )
@@ -1225,6 +1258,7 @@ impl ObjStore for S3ObjStore {
             .map_err(|source| Self::dispatch_error(Operation::Copy, source))?;
         let res = Self::error_for_status(
             res,
+            self.state.bucket.name(),
             Operation::Copy,
             Some(Resource::Object {
                 key: source_key.clone(),
@@ -1354,6 +1388,7 @@ mod tests {
             StatusCode::PRECONDITION_FAILED,
             &HeaderMap::new(),
             br#"<Error><Code>PreconditionFailed</Code><Message>condition failed</Message></Error>"#,
+            "test-bucket",
             Operation::Put,
             Some(Resource::Object {
                 key: "existing-key".to_string(),
@@ -1384,6 +1419,7 @@ mod tests {
             StatusCode::FORBIDDEN,
             &HeaderMap::new(),
             br#"<Error><Code>AccessDenied</Code><Message>denied</Message></Error>"#,
+            "private-bucket",
             Operation::List,
             Some(Resource::Bucket {
                 bucket: "private-bucket".to_string(),
@@ -1418,6 +1454,7 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             &headers,
             br#"<Error><Code>InternalError</Code><Message>failed</Message></Error>"#,
+            "test-bucket",
             Operation::Copy,
             None,
         );
@@ -1442,6 +1479,27 @@ mod tests {
                 assert_eq!(extended_request_id.as_deref(), Some("extended-456"));
             }
             other => panic!("expected Backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_s3_no_such_bucket_for_prefix_resource() {
+        let err = S3ObjStore::classify_s3_error(
+            StatusCode::NOT_FOUND,
+            &HeaderMap::new(),
+            br#"<Error><Code>NoSuchBucket</Code><Message>missing bucket</Message></Error>"#,
+            "missing-bucket",
+            Operation::List,
+            Some(Resource::Prefix {
+                prefix: "tenant-a/".to_string(),
+            }),
+        );
+
+        match err {
+            ObjStoreError::BucketNotFound { bucket, .. } => {
+                assert_eq!(bucket, "missing-bucket");
+            }
+            other => panic!("expected BucketNotFound, got {other:?}"),
         }
     }
 

@@ -16,6 +16,7 @@ pub enum ObjStoreError {
     },
     ProviderNotFound {
         scheme: String,
+        source: Option<BoxError>,
     },
     AlreadyExists {
         resource: Resource,
@@ -27,6 +28,8 @@ pub enum ObjStoreError {
         source: Option<BoxError>,
     },
     Unauthenticated {
+        operation: Operation,
+        resource: Option<Resource>,
         source: Option<BoxError>,
     },
     PermissionDenied {
@@ -51,13 +54,14 @@ pub enum ObjStoreError {
         message: String,
         source: Option<BoxError>,
     },
-    JsonContentDeserialization {
+    ContentDeserialization {
         key: String,
-        source: BoxError,
+        format: String,
+        source: Option<BoxError>,
     },
     Io {
         operation: Operation,
-        source: std::io::Error,
+        source: Option<BoxError>,
     },
     Timeout {
         operation: Operation,
@@ -65,11 +69,11 @@ pub enum ObjStoreError {
     },
     Dispatch {
         operation: Operation,
-        source: BoxError,
+        source: Option<BoxError>,
     },
     Response {
         operation: Operation,
-        source: BoxError,
+        source: Option<BoxError>,
     },
     Backend {
         backend: &'static str,
@@ -135,6 +139,7 @@ impl ObjStoreError {
     pub fn provider_not_found(scheme: impl Into<String>) -> Self {
         Self::ProviderNotFound {
             scheme: scheme.into(),
+            source: None,
         }
     }
 
@@ -170,20 +175,20 @@ impl ObjStoreError {
             | Self::BucketNotFound { source: field, .. }
             | Self::AlreadyExists { source: field, .. }
             | Self::PreconditionFailed { source: field, .. }
-            | Self::Unauthenticated { source: field }
+            | Self::Unauthenticated { source: field, .. }
             | Self::PermissionDenied { source: field, .. }
             | Self::Unsupported { source: field, .. }
             | Self::InvalidConfig { source: field, .. }
             | Self::InvalidRequest { source: field, .. }
             | Self::InvalidMetadata { source: field, .. }
+            | Self::ContentDeserialization { source: field, .. }
+            | Self::Io { source: field, .. }
             | Self::Timeout { source: field, .. }
+            | Self::Dispatch { source: field, .. }
+            | Self::Response { source: field, .. }
             | Self::Backend { source: field, .. }
-            | Self::Internal { source: field, .. } => *field = source,
-            Self::JsonContentDeserialization { .. }
-            | Self::ProviderNotFound { .. }
-            | Self::Io { .. }
-            | Self::Dispatch { .. }
-            | Self::Response { .. } => {}
+            | Self::Internal { source: field, .. }
+            | Self::ProviderNotFound { source: field, .. } => *field = source,
         }
         self
     }
@@ -194,7 +199,7 @@ impl fmt::Display for ObjStoreError {
         match self {
             Self::ObjectNotFound { key, .. } => write!(f, "object not found: {key}"),
             Self::BucketNotFound { bucket, .. } => write!(f, "bucket not found: {bucket}"),
-            Self::ProviderNotFound { scheme } => {
+            Self::ProviderNotFound { scheme, .. } => {
                 write!(f, "provider not found for URL scheme: {scheme}")
             }
             Self::AlreadyExists { resource, .. } => {
@@ -203,7 +208,9 @@ impl fmt::Display for ObjStoreError {
             Self::PreconditionFailed { operation, .. } => {
                 write!(f, "precondition failed while {operation}")
             }
-            Self::Unauthenticated { .. } => write!(f, "authentication failed"),
+            Self::Unauthenticated { operation, .. } => {
+                write!(f, "authentication failed while {operation}")
+            }
             Self::PermissionDenied { operation, .. } => {
                 write!(f, "permission denied while {operation}")
             }
@@ -215,8 +222,8 @@ impl fmt::Display for ObjStoreError {
             Self::InvalidMetadata { key, message, .. } => {
                 write!(f, "invalid metadata for {key}: {message}")
             }
-            Self::JsonContentDeserialization { key, .. } => {
-                write!(f, "could not deserialize JSON content for {key}")
+            Self::ContentDeserialization { key, format, .. } => {
+                write!(f, "could not deserialize {format} content for {key}")
             }
             Self::Io { operation, .. } => write!(f, "I/O error while {operation}"),
             Self::Timeout { operation, .. } => write!(f, "request timed out while {operation}"),
@@ -258,19 +265,20 @@ impl StdError for ObjStoreError {
             | Self::BucketNotFound { source, .. }
             | Self::AlreadyExists { source, .. }
             | Self::PreconditionFailed { source, .. }
-            | Self::Unauthenticated { source }
+            | Self::Unauthenticated { source, .. }
             | Self::PermissionDenied { source, .. }
             | Self::Unsupported { source, .. }
             | Self::InvalidConfig { source, .. }
             | Self::InvalidRequest { source, .. }
             | Self::InvalidMetadata { source, .. }
+            | Self::ContentDeserialization { source, .. }
+            | Self::Io { source, .. }
             | Self::Timeout { source, .. }
+            | Self::Dispatch { source, .. }
+            | Self::Response { source, .. }
             | Self::Backend { source, .. }
-            | Self::Internal { source, .. } => source.as_deref().map(|source| source as _),
-            Self::JsonContentDeserialization { source, .. } => Some(&**source),
-            Self::Io { source, .. } => Some(source),
-            Self::Dispatch { source, .. } | Self::Response { source, .. } => Some(&**source),
-            Self::ProviderNotFound { .. } => None,
+            | Self::Internal { source, .. }
+            | Self::ProviderNotFound { source, .. } => source.as_deref().map(|source| source as _),
         }
     }
 }
@@ -313,7 +321,7 @@ impl From<std::io::Error> for ObjStoreError {
     fn from(source: std::io::Error) -> Self {
         Self::Io {
             operation: Operation::Unknown,
-            source,
+            source: Some(source.into()),
         }
     }
 }

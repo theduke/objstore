@@ -50,7 +50,7 @@ impl FsObjStore {
         let root = config.path.clone();
         std::fs::create_dir_all(&root).map_err(|source| ObjStoreError::Io {
             operation: Operation::Build,
-            source,
+            source: Some(source.into()),
         })?;
 
         let safe_uri = Url::parse(&format!("file://{}", root.display())).map_err(|source| {
@@ -80,7 +80,10 @@ fn meta_from_fs_meta(key: String, fs_meta: std::fs::Metadata) -> ObjectMeta {
 }
 
 fn io_error(operation: Operation, source: std::io::Error) -> ObjStoreError {
-    ObjStoreError::Io { operation, source }
+    ObjStoreError::Io {
+        operation,
+        source: Some(source.into()),
+    }
 }
 
 async fn list_dir_rec(
@@ -243,7 +246,7 @@ impl ObjStore for FsObjStore {
                     .map_ok(Bytes::from)
                     .map_err(|source| ObjStoreError::Io {
                         operation: Operation::GetStream,
-                        source,
+                        source: Some(source.into()),
                     })
                     .boxed();
                 Ok(Some(stream))
@@ -289,7 +292,7 @@ impl ObjStore for FsObjStore {
             .map_ok(Bytes::from)
             .map_err(|source| ObjStoreError::Io {
                 operation: Operation::GetStream,
-                source,
+                source: Some(source.into()),
             })
             .boxed();
 
