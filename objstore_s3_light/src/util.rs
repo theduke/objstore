@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use base64::Engine as _;
 use http::HeaderMap;
+#[cfg(test)]
+use objstore::BackendError;
 use objstore::{Conditions, ObjStoreError, ObjectMeta, Result};
 use quick_xml::de::from_reader;
 use serde::Deserialize;
@@ -182,12 +184,13 @@ pub fn error_from_success_response_body(body: &[u8]) -> Result<()> {
     Err(ObjStoreError::Backend {
         backend: "objstore.s3-light",
         operation: objstore::Operation::Unknown,
-        resource: None,
-        code: err.code.clone(),
-        status: None,
-        message: err.message.clone(),
-        request_id: err.request_id,
-        extended_request_id: err.extended_request_id,
+        details: Box::new(BackendError {
+            code: err.code.clone(),
+            message: err.message.clone(),
+            request_id: err.request_id,
+            extended_request_id: err.extended_request_id,
+            ..BackendError::default()
+        }),
         source: None,
     })
 }

@@ -16,9 +16,9 @@ use rusty_s3::actions::{
 use time::OffsetDateTime;
 
 use objstore::{
-    Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError,
-    ObjectMeta, ObjectMetaPage, Operation, Put, Resource, Result as ObjStoreResult, UploadUrlArgs,
-    ValueStream,
+    BackendError, Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore,
+    ObjStoreError, ObjectMeta, ObjectMetaPage, Operation, Put, Resource, Result as ObjStoreResult,
+    UploadUrlArgs, ValueStream,
 };
 
 use crate::{
@@ -297,12 +297,14 @@ impl S3ObjStore {
                 _ => ObjStoreError::Backend {
                     backend: Self::KIND,
                     operation,
-                    resource,
-                    code,
-                    status: Some(status.as_u16()),
-                    message,
-                    request_id,
-                    extended_request_id,
+                    details: Box::new(BackendError {
+                        resource,
+                        code,
+                        status: Some(status.as_u16()),
+                        message,
+                        request_id,
+                        extended_request_id,
+                    }),
                     source: None,
                 },
             },
@@ -315,23 +317,24 @@ impl S3ObjStore {
                 if matches!(
                     code.as_deref(),
                     Some("BucketAlreadyExists" | "BucketAlreadyOwnedByYou")
-                ) {
-                    if let Some(Resource::Bucket { bucket }) = resource.clone() {
-                        return ObjStoreError::AlreadyExists {
-                            resource: Resource::Bucket { bucket },
-                            source: None,
-                        };
-                    }
+                ) && let Some(Resource::Bucket { bucket }) = resource.clone()
+                {
+                    return ObjStoreError::AlreadyExists {
+                        resource: Resource::Bucket { bucket },
+                        source: None,
+                    };
                 }
                 ObjStoreError::Backend {
                     backend: Self::KIND,
                     operation,
-                    resource,
-                    code,
-                    status: Some(status.as_u16()),
-                    message,
-                    request_id,
-                    extended_request_id,
+                    details: Box::new(BackendError {
+                        resource,
+                        code,
+                        status: Some(status.as_u16()),
+                        message,
+                        request_id,
+                        extended_request_id,
+                    }),
                     source: None,
                 }
             }
@@ -342,12 +345,14 @@ impl S3ObjStore {
             _ => ObjStoreError::Backend {
                 backend: Self::KIND,
                 operation,
-                resource,
-                code,
-                status: Some(status.as_u16()),
-                message,
-                request_id,
-                extended_request_id,
+                details: Box::new(BackendError {
+                    resource,
+                    code,
+                    status: Some(status.as_u16()),
+                    message,
+                    request_id,
+                    extended_request_id,
+                }),
                 source: None,
             },
         }
@@ -386,12 +391,14 @@ impl S3ObjStore {
         Err(ObjStoreError::Backend {
             backend: Self::KIND,
             operation,
-            resource,
-            code: err.code.clone(),
-            status: None,
-            message: err.message.clone(),
-            request_id: err.request_id,
-            extended_request_id: err.extended_request_id,
+            details: Box::new(BackendError {
+                resource,
+                code: err.code.clone(),
+                status: None,
+                message: err.message.clone(),
+                request_id: err.request_id,
+                extended_request_id: err.extended_request_id,
+            }),
             source: None,
         })
     }
@@ -451,14 +458,13 @@ impl S3ObjStore {
                 .ok_or_else(|| ObjStoreError::Backend {
                     backend: Self::KIND,
                     operation: Operation::Meta,
-                    resource: Some(Resource::Object {
-                        key: key.to_string(),
+                    details: Box::new(BackendError {
+                        resource: Some(Resource::Object {
+                            key: key.to_string(),
+                        }),
+                        message: Some(context.to_string()),
+                        ..BackendError::default()
                     }),
-                    code: None,
-                    status: None,
-                    message: Some(context.to_string()),
-                    request_id: None,
-                    extended_request_id: None,
                     source: None,
                 })
         } else {
@@ -1463,20 +1469,16 @@ mod tests {
             ObjStoreError::Backend {
                 backend,
                 operation,
-                code,
-                status,
-                message,
-                request_id,
-                extended_request_id,
+                details,
                 ..
             } => {
                 assert_eq!(backend, S3ObjStore::KIND);
                 assert_eq!(operation, Operation::Copy);
-                assert_eq!(code.as_deref(), Some("InternalError"));
-                assert_eq!(status, Some(500));
-                assert_eq!(message.as_deref(), Some("failed"));
-                assert_eq!(request_id.as_deref(), Some("request-123"));
-                assert_eq!(extended_request_id.as_deref(), Some("extended-456"));
+                assert_eq!(details.code.as_deref(), Some("InternalError"));
+                assert_eq!(details.status, Some(500));
+                assert_eq!(details.message.as_deref(), Some("failed"));
+                assert_eq!(details.request_id.as_deref(), Some("request-123"));
+                assert_eq!(details.extended_request_id.as_deref(), Some("extended-456"));
             }
             other => panic!("expected Backend, got {other:?}"),
         }

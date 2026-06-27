@@ -10,8 +10,8 @@ use url::Url;
 use sha2::Digest;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta,
-    ObjectMetaPage, Operation, Put, Result, UploadUrlArgs, ValueStream,
+    BackendError, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError,
+    ObjectMeta, ObjectMetaPage, Operation, Put, Result, UploadUrlArgs, ValueStream,
 };
 
 use crate::LogFsObjStoreConfig;
@@ -75,12 +75,10 @@ impl LogFsObjStore {
             .map_err(|source| ObjStoreError::Backend {
                 backend: Self::KIND,
                 operation: Operation::Unknown,
-                resource: None,
-                code: None,
-                status: None,
-                message: Some("logfs blocking task failed".to_string()),
-                request_id: None,
-                extended_request_id: None,
+                details: Box::new(BackendError {
+                    message: Some("logfs blocking task failed".to_string()),
+                    ..BackendError::default()
+                }),
                 source: Some(source.into()),
             })?
             .map_err(map_logfs_err)
@@ -333,12 +331,10 @@ impl ObjStore for LogFsObjStore {
                     .map_err(|source| ObjStoreError::Backend {
                         backend: Self::KIND,
                         operation: Operation::Put,
-                        resource: None,
-                        code: None,
-                        status: None,
-                        message: Some("logfs writer task failed".to_string()),
-                        request_id: None,
-                        extended_request_id: None,
+                        details: Box::new(BackendError {
+                            message: Some("logfs writer task failed".to_string()),
+                            ..BackendError::default()
+                        }),
                         source: Some(source.into()),
                     })?
                     .map_err(map_logfs_err)
@@ -413,12 +409,10 @@ fn map_logfs_err(source: LogFsError) -> ObjStoreError {
         source => ObjStoreError::Backend {
             backend: LogFsObjStore::KIND,
             operation: Operation::Unknown,
-            resource: None,
-            code: None,
-            status: None,
-            message: Some(source.to_string()),
-            request_id: None,
-            extended_request_id: None,
+            details: Box::new(BackendError {
+                message: Some(source.to_string()),
+                ..BackendError::default()
+            }),
             source: Some(source.into()),
         },
     }
