@@ -121,6 +121,15 @@ impl<S> PrefixObjStore<S> {
                 resource: resource.map(|resource| self.map_resource(resource)),
                 source,
             },
+            ObjStoreError::Unauthenticated {
+                operation,
+                resource,
+                source,
+            } => ObjStoreError::Unauthenticated {
+                operation,
+                resource: resource.map(|resource| self.map_resource(resource)),
+                source,
+            },
             ObjStoreError::Backend {
                 backend,
                 operation,
@@ -151,12 +160,15 @@ impl<S> PrefixObjStore<S> {
                 message,
                 source,
             },
-            ObjStoreError::JsonContentDeserialization { key, source } => {
-                ObjStoreError::JsonContentDeserialization {
-                    key: self.map_key_lossy(key),
-                    source,
-                }
-            }
+            ObjStoreError::ContentDeserialization {
+                key,
+                format,
+                source,
+            } => ObjStoreError::ContentDeserialization {
+                key: self.map_key_lossy(key),
+                format,
+                source,
+            },
             err => err,
         }
     }
