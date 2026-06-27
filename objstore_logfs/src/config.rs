@@ -90,7 +90,6 @@ impl LogFsObjStoreConfig {
 
     pub(crate) fn to_logfs_config(&self) -> LogConfig {
         let mut builder = ConfigBuilder::new(self.path.clone());
-        dbg!(&self);
         if self.raw_mode {
             builder = builder.raw_mode();
         }

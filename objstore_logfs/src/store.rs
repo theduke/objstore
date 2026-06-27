@@ -39,7 +39,6 @@ impl LogFsObjStore {
 
     pub fn new(config: LogFsObjStoreConfig) -> Result<Self> {
         let log_config = config.to_logfs_config();
-        dbg!(&log_config);
         let log = LogFs::open(log_config).map_err(map_logfs_err)?;
         let safe_uri = config.safe_uri()?;
 
@@ -291,13 +290,10 @@ impl ObjStore for LogFsObjStore {
             DataSource::Data(bytes) => {
                 let data = bytes.to_vec();
                 self.with_log(move |log| {
-                    dbg!("pre insert");
                     log.insert(key.clone(), data)?;
-                    dbg!("post insert");
                     let meta = log
                         .get_meta(&key)?
                         .ok_or_else(|| LogFsError::NotFound { path: key.clone() })?;
-                    dbg!("post get_meta", &meta);
                     Ok(Self::key_meta_to_object_meta(key, meta))
                 })
                 .await

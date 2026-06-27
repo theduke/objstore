@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use futures::TryStreamExt as _;
 
 use crate::{
     Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta, ObjectMetaPage,
@@ -218,6 +219,14 @@ impl<S> PrefixObjStore<S> {
 
         Ok(page)
     }
+
+    fn map_stream_errors(&self, stream: ValueStream) -> ValueStream {
+        let prefix = PrefixObjStore {
+            prefix: self.prefix.clone(),
+            inner: (),
+        };
+        Box::pin(stream.map_err(move |err| prefix.map_error(err)))
+    }
 }
 
 fn normalize_prefix(prefix: &str) -> String {
@@ -271,6 +280,7 @@ where
             .get_stream(&self.prepend_prefix(key))
             .await
             .map_err(|err| self.map_error(err))
+            .map(|stream| stream.map(|stream| self.map_stream_errors(stream)))
     }
 
     async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {
@@ -288,6 +298,7 @@ where
             .await
             .map_err(|err| self.map_error(err))?
             .map(|(meta, value)| self.map_meta(meta).map(|meta| (meta, value)))
+            .map(|result| result.map(|(meta, stream)| (meta, self.map_stream_errors(stream))))
             .transpose()
     }
 
