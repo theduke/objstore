@@ -11,7 +11,7 @@ pub mod wrapper;
 
 pub use self::{
     builder::ObjStoreBuilder,
-    error::{BoxError, ObjStoreError, Operation, Resource, Result},
+    error::{BackendError, BoxError, ObjStoreError, Operation, Resource, Result},
     provider::ObjStoreProvider,
     store::{DynObjStore, ObjStore, ObjStoreExt},
     types::*,

@@ -133,22 +133,15 @@ impl<S> PrefixObjStore<S> {
             ObjStoreError::Backend {
                 backend,
                 operation,
-                resource,
-                code,
-                status,
-                message,
-                request_id,
-                extended_request_id,
+                mut details,
                 source,
             } => ObjStoreError::Backend {
                 backend,
                 operation,
-                resource: resource.map(|resource| self.map_resource(resource)),
-                code,
-                status,
-                message,
-                request_id,
-                extended_request_id,
+                details: {
+                    details.resource = details.resource.map(|resource| self.map_resource(resource));
+                    details
+                },
                 source,
             },
             ObjStoreError::InvalidMetadata {

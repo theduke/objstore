@@ -78,12 +78,7 @@ pub enum ObjStoreError {
     Backend {
         backend: &'static str,
         operation: Operation,
-        resource: Option<Resource>,
-        code: Option<String>,
-        status: Option<u16>,
-        message: Option<String>,
-        request_id: Option<String>,
-        extended_request_id: Option<String>,
+        details: Box<BackendError>,
         source: Option<BoxError>,
     },
     Internal {
@@ -119,6 +114,16 @@ pub enum Resource {
     Object { key: String },
     Prefix { prefix: String },
     Provider { scheme: String },
+}
+
+#[derive(Debug, Default)]
+pub struct BackendError {
+    pub resource: Option<Resource>,
+    pub code: Option<String>,
+    pub status: Option<u16>,
+    pub message: Option<String>,
+    pub request_id: Option<String>,
+    pub extended_request_id: Option<String>,
 }
 
 impl ObjStoreError {
@@ -158,12 +163,7 @@ impl ObjStoreError {
         Self::Backend {
             backend,
             operation,
-            resource: None,
-            code: None,
-            status: None,
-            message: None,
-            request_id: None,
-            extended_request_id: None,
+            details: Box::default(),
             source: Some(source.into()),
         }
     }
@@ -234,18 +234,17 @@ impl fmt::Display for ObjStoreError {
             Self::Backend {
                 backend,
                 operation,
-                code,
-                message,
+                details,
                 ..
             } => {
-                if let (Some(code), Some(message)) = (code, message) {
+                if let (Some(code), Some(message)) = (&details.code, &details.message) {
                     write!(
                         f,
                         "{backend} backend failed while {operation}: {code}: {message}"
                     )
-                } else if let Some(code) = code {
+                } else if let Some(code) = &details.code {
                     write!(f, "{backend} backend failed while {operation}: {code}")
-                } else if let Some(message) = message {
+                } else if let Some(message) = &details.message {
                     write!(f, "{backend} backend failed while {operation}: {message}")
                 } else {
                     write!(f, "{backend} backend failed while {operation}")
