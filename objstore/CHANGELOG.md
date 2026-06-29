@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3](https://github.com/theduke/objstore/compare/objstore-v0.1.0-alpha.2...objstore-v0.1.0-alpha.3) - 2026-06-29
+
+### Other
+
+- fix alpha.2 publish dependencies
+
 ## [0.1.0-alpha.2](https://github.com/theduke/objstore/compare/objstore-v0.1.0-alpha.1...objstore-v0.1.0-alpha.2) - 2026-06-29
 
 ### Added
