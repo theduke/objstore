@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::{
-    Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, KeyStream, ListArgs, MetaStream,
-    ObjStoreError, ObjectMeta, ObjectMetaPage, Put, Result, SizedValueStream, UploadUrlArgs,
-    ValueStream,
+    ByteRange, Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, KeyStream, ListArgs,
+    MetaStream, ObjStoreError, ObjectMeta, ObjectMetaPage, Put, Result, SizedValueStream,
+    UploadUrlArgs, ValueStream,
 };
 use futures::{TryStreamExt as _, stream};
 
@@ -37,10 +37,35 @@ pub trait ObjStore: Send + Sync + std::fmt::Debug {
     /// Get metadata for a given key.
     async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>>;
 
+    /// Build a streaming read, optionally restricted to a byte range.
+    fn build_stream(&self, key: &str) -> GetStreamBuilder<'_, Self>
+    where
+        Self: Sized,
+    {
+        GetStreamBuilder::new(self, key)
+    }
+
     /// Get the value for a given key.
     async fn get(&self, key: &str) -> Result<Option<Bytes>>;
 
     async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>>;
+
+    /// Stream an end-exclusive byte range from an object.
+    ///
+    /// Bounded ranges are clamped at EOF. A start at exact EOF returns an
+    /// empty stream; a start beyond EOF or an end before the start returns
+    /// [`ObjStoreError::InvalidRequest`]. `Ok(None)` means the object does not
+    /// exist. Implementations must begin reading at the requested offset rather
+    /// than consuming the object from byte zero.
+    async fn get_range_stream(&self, key: &str, range: ByteRange) -> Result<Option<ValueStream>>;
+
+    /// Collect an end-exclusive byte range into memory.
+    async fn get_range(&self, key: &str, range: ByteRange) -> Result<Option<Bytes>> {
+        match self.get_range_stream(key, range).await? {
+            Some(stream) => Ok(Some(stream.try_collect::<BytesMut>().await?.freeze())),
+            None => Ok(None),
+        }
+    }
 
     /// Get both the value and metadata for a given key.
     async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>>;
@@ -196,6 +221,14 @@ impl<K: ObjStore> ObjStore for Arc<K> {
         self.as_ref().get_stream(key).await
     }
 
+    async fn get_range_stream(&self, key: &str, range: ByteRange) -> Result<Option<ValueStream>> {
+        self.as_ref().get_range_stream(key, range).await
+    }
+
+    async fn get_range(&self, key: &str, range: ByteRange) -> Result<Option<Bytes>> {
+        self.as_ref().get_range(key, range).await
+    }
+
     async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {
         self.as_ref().get_with_meta(key).await
     }
@@ -264,6 +297,14 @@ impl ObjStore for DynObjStore {
         self.as_ref().get_stream(key).await
     }
 
+    async fn get_range_stream(&self, key: &str, range: ByteRange) -> Result<Option<ValueStream>> {
+        self.as_ref().get_range_stream(key, range).await
+    }
+
+    async fn get_range(&self, key: &str, range: ByteRange) -> Result<Option<Bytes>> {
+        self.as_ref().get_range(key, range).await
+    }
+
     async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {
         self.as_ref().get_with_meta(key).await
     }
@@ -319,6 +360,69 @@ impl ObjStore for DynObjStore {
             }
             Ok(None) => Ok(None),
             Err(e) => Err(e),
+        }
+    }
+}
+
+/// Builder for streaming all or part of an object.
+pub struct GetStreamBuilder<'a, S: ?Sized> {
+    store: &'a S,
+    key: String,
+    range: Option<ByteRange>,
+}
+
+impl<'a, S> GetStreamBuilder<'a, S>
+where
+    S: ObjStore + ?Sized,
+{
+    fn new(store: &'a S, key: &str) -> Self {
+        Self {
+            store,
+            key: key.to_string(),
+            range: None,
+        }
+    }
+
+    /// Set the inclusive start offset. If omitted, reading starts at byte zero.
+    pub fn with_start(mut self, start: u64) -> Self {
+        self.range.get_or_insert(ByteRange::from_offset(0)).start = start;
+        self
+    }
+
+    /// Set the exclusive end offset. If omitted, reading continues through EOF.
+    pub fn with_end(mut self, end: u64) -> Self {
+        self.range.get_or_insert(ByteRange::from_offset(0)).end = Some(end);
+        self
+    }
+
+    /// Set both offsets from a [`ByteRange`].
+    pub fn with_range(mut self, range: ByteRange) -> Self {
+        self.range = Some(range);
+        self
+    }
+
+    /// Open the configured byte stream.
+    pub async fn send(self) -> Result<Option<ValueStream>> {
+        match self.range {
+            Some(range) => self.store.get_range_stream(&self.key, range).await,
+            None => self.store.get_stream(&self.key).await,
+        }
+    }
+
+    /// Open the configured byte stream together with full-object metadata.
+    pub async fn send_with_meta(self) -> Result<Option<(ObjectMeta, ValueStream)>> {
+        match self.range {
+            None => self.store.get_stream_with_meta(&self.key).await,
+            Some(range) => {
+                let meta = match self.store.meta(&self.key).await? {
+                    Some(meta) => meta,
+                    None => return Ok(None),
+                };
+                match self.store.get_range_stream(&self.key, range).await? {
+                    Some(stream) => Ok(Some((meta, stream))),
+                    None => Ok(None),
+                }
+            }
         }
     }
 }

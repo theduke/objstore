@@ -3,6 +3,93 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use time::OffsetDateTime;
 
+/// An end-exclusive byte range within an object.
+///
+/// A range with no `end` reads from `start` through the end of the object.
+/// Backends clamp a bounded range's end to the object size, allow `start` at
+/// exact EOF (which produces an empty stream), and reject a start beyond EOF
+/// or an end before the start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: Option<u64>,
+}
+
+/// Why a [`ByteRange`] cannot be resolved for an object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteRangeError {
+    EndBeforeStart { start: u64, end: u64 },
+    StartBeyondEof { start: u64, object_size: u64 },
+}
+
+impl std::fmt::Display for ByteRangeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EndBeforeStart { start, end } => {
+                write!(formatter, "range end {end} precedes start {start}")
+            }
+            Self::StartBeyondEof { start, object_size } => {
+                write!(
+                    formatter,
+                    "range start {start} exceeds object size {object_size}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ByteRangeError {}
+
+impl ByteRange {
+    /// Create a bounded, end-exclusive range.
+    pub const fn bounded(start: u64, end: u64) -> Self {
+        Self {
+            start,
+            end: Some(end),
+        }
+    }
+
+    /// Create a range from `start` through the end of the object.
+    pub const fn from_offset(start: u64) -> Self {
+        Self { start, end: None }
+    }
+
+    /// Resolve this range against an object's size.
+    pub fn resolve(
+        self,
+        object_size: u64,
+    ) -> std::result::Result<std::ops::Range<u64>, ByteRangeError> {
+        if let Some(end) = self.end
+            && end < self.start
+        {
+            return Err(ByteRangeError::EndBeforeStart {
+                start: self.start,
+                end,
+            });
+        }
+        if self.start > object_size {
+            return Err(ByteRangeError::StartBeyondEof {
+                start: self.start,
+                object_size,
+            });
+        }
+
+        Ok(self.start..self.end.unwrap_or(object_size).min(object_size))
+    }
+}
+
+impl From<std::ops::Range<u64>> for ByteRange {
+    fn from(range: std::ops::Range<u64>) -> Self {
+        Self::bounded(range.start, range.end)
+    }
+}
+
+impl From<std::ops::RangeFrom<u64>> for ByteRange {
+    fn from(range: std::ops::RangeFrom<u64>) -> Self {
+        Self::from_offset(range.start)
+    }
+}
+
 use crate::Result;
 
 /// Byte stream.
@@ -516,7 +603,27 @@ impl UploadUrlArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conditions, MatchValue};
+    use super::{ByteRange, ByteRangeError, Conditions, MatchValue};
+
+    #[test]
+    fn byte_range_resolves_against_object_size() {
+        assert_eq!(ByteRange::from(2..5), ByteRange::bounded(2, 5));
+        assert_eq!(ByteRange::from(5..), ByteRange::from_offset(5));
+        assert_eq!(ByteRange::bounded(2, 5).resolve(10), Ok(2..5));
+        assert_eq!(ByteRange::bounded(8, 20).resolve(10), Ok(8..10));
+        assert_eq!(ByteRange::from_offset(10).resolve(10), Ok(10..10));
+        assert_eq!(
+            ByteRange::bounded(5, 4).resolve(10),
+            Err(ByteRangeError::EndBeforeStart { start: 5, end: 4 })
+        );
+        assert_eq!(
+            ByteRange::from_offset(11).resolve(10),
+            Err(ByteRangeError::StartBeyondEof {
+                start: 11,
+                object_size: 10,
+            })
+        );
+    }
 
     #[test]
     fn if_not_exists_sets_if_none_match_any() {

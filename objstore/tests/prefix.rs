@@ -1,7 +1,7 @@
 use objstore::wrapper::prefix::PrefixObjStore;
 use objstore::{
-    DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjStoreExt as _, ObjectMeta,
-    ObjectMetaPage, Put, Result, UploadUrlArgs, ValueStream,
+    ByteRange, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjStoreExt as _,
+    ObjectMeta, ObjectMetaPage, Put, Result, UploadUrlArgs, ValueStream,
 };
 use objstore_memory::MemoryObjStore;
 use std::sync::{Arc, Mutex};
@@ -12,6 +12,9 @@ struct RecordingListStore {
     list_page: Mutex<Option<ObjectMetaPage>>,
     key_page: Mutex<Option<KeyPage>>,
     meta_error: Mutex<Option<ObjStoreError>>,
+    full_stream_calls: Mutex<usize>,
+    range_stream_calls: Mutex<usize>,
+    full_stream_with_meta_calls: Mutex<usize>,
 }
 
 impl RecordingListStore {
@@ -21,6 +24,9 @@ impl RecordingListStore {
             list_page: Mutex::new(Some(list_page)),
             key_page: Mutex::new(None),
             meta_error: Mutex::new(None),
+            full_stream_calls: Mutex::new(0),
+            range_stream_calls: Mutex::new(0),
+            full_stream_with_meta_calls: Mutex::new(0),
         }
     }
 
@@ -30,6 +36,9 @@ impl RecordingListStore {
             list_page: Mutex::new(None),
             key_page: Mutex::new(None),
             meta_error: Mutex::new(Some(err)),
+            full_stream_calls: Mutex::new(0),
+            range_stream_calls: Mutex::new(0),
+            full_stream_with_meta_calls: Mutex::new(0),
         }
     }
 
@@ -59,11 +68,11 @@ impl ObjStore for RecordingListStore {
         Ok(())
     }
 
-    async fn meta(&self, _key: &str) -> Result<Option<ObjectMeta>> {
+    async fn meta(&self, key: &str) -> Result<Option<ObjectMeta>> {
         if let Some(err) = self.meta_error.lock().unwrap().take() {
             return Err(err);
         }
-        Ok(None)
+        Ok(Some(ObjectMeta::new(key.to_string())))
     }
 
     async fn get(&self, _key: &str) -> Result<Option<bytes::Bytes>> {
@@ -71,7 +80,13 @@ impl ObjStore for RecordingListStore {
     }
 
     async fn get_stream(&self, _key: &str) -> Result<Option<ValueStream>> {
-        Ok(None)
+        *self.full_stream_calls.lock().unwrap() += 1;
+        Ok(Some(Box::pin(futures::stream::empty())))
+    }
+
+    async fn get_range_stream(&self, _key: &str, _range: ByteRange) -> Result<Option<ValueStream>> {
+        *self.range_stream_calls.lock().unwrap() += 1;
+        Ok(Some(Box::pin(futures::stream::empty())))
     }
 
     async fn get_with_meta(&self, _key: &str) -> Result<Option<(bytes::Bytes, ObjectMeta)>> {
@@ -79,7 +94,11 @@ impl ObjStore for RecordingListStore {
     }
 
     async fn get_stream_with_meta(&self, _key: &str) -> Result<Option<(ObjectMeta, ValueStream)>> {
-        Ok(None)
+        *self.full_stream_with_meta_calls.lock().unwrap() += 1;
+        Ok(Some((
+            ObjectMeta::new("stream".to_string()),
+            Box::pin(futures::stream::empty()),
+        )))
     }
 
     async fn generate_download_url(&self, _args: DownloadUrlArgs) -> Result<Option<url::Url>> {
@@ -129,6 +148,37 @@ impl ObjStore for RecordingListStore {
                 source: None,
             })
     }
+}
+
+#[tokio::test]
+async fn test_stream_builder_routes_full_and_ranged_reads() {
+    let store = RecordingListStore::default();
+
+    store.build_stream("object").send().await.unwrap();
+    assert_eq!(*store.full_stream_calls.lock().unwrap(), 1);
+    assert_eq!(*store.range_stream_calls.lock().unwrap(), 0);
+
+    store
+        .build_stream("object")
+        .with_start(2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(*store.full_stream_calls.lock().unwrap(), 1);
+    assert_eq!(*store.range_stream_calls.lock().unwrap(), 1);
+
+    store.build_stream("object").send_with_meta().await.unwrap();
+    assert_eq!(*store.full_stream_with_meta_calls.lock().unwrap(), 1);
+    assert_eq!(*store.range_stream_calls.lock().unwrap(), 1);
+
+    store
+        .build_stream("object")
+        .with_end(2)
+        .send_with_meta()
+        .await
+        .unwrap();
+    assert_eq!(*store.full_stream_with_meta_calls.lock().unwrap(), 1);
+    assert_eq!(*store.range_stream_calls.lock().unwrap(), 2);
 }
 
 #[tokio::test]

@@ -11,11 +11,11 @@ use std::{
 use bytes::Bytes;
 use futures::{StreamExt as _, TryStreamExt as _};
 use time::OffsetDateTime;
-use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt, AsyncSeekExt as _, AsyncWriteExt as _};
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta,
-    ObjectMetaPage, Operation, Put, Result, UploadUrlArgs, ValueStream,
+    ByteRange, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError,
+    ObjectMeta, ObjectMetaPage, Operation, Put, Result, UploadUrlArgs, ValueStream,
 };
 use sha2::Digest;
 use url::Url;
@@ -254,6 +254,38 @@ impl ObjStore for FsObjStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(io_error(Operation::GetStream, err)),
         }
+    }
+
+    async fn get_range_stream(&self, key: &str, range: ByteRange) -> Result<Option<ValueStream>> {
+        let path = self.key_path(key);
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_error(Operation::GetStream, err)),
+        };
+        let size = file
+            .metadata()
+            .await
+            .map_err(|err| io_error(Operation::GetStream, err))?
+            .len();
+        let range = range
+            .resolve(size)
+            .map_err(|message| ObjStoreError::InvalidRequest {
+                message: format!("invalid byte range for {key:?}: {message}"),
+                source: None,
+            })?;
+
+        file.seek(std::io::SeekFrom::Start(range.start))
+            .await
+            .map_err(|err| io_error(Operation::GetStream, err))?;
+        let stream = tokio_util::io::ReaderStream::new(file.take(range.end - range.start))
+            .map_ok(Bytes::from)
+            .map_err(|source| ObjStoreError::Io {
+                operation: Operation::GetStream,
+                source: Some(source.into()),
+            })
+            .boxed();
+        Ok(Some(stream))
     }
 
     async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {

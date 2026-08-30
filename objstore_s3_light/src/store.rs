@@ -9,16 +9,18 @@ use rusty_s3::{Bucket, Map, S3Action, actions::ListObjectsV2Response};
 use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
 use http::header::CONTENT_LENGTH;
-use http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_TYPE, ETAG};
+use http::header::{
+    CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_TYPE, ETAG, RANGE,
+};
 use rusty_s3::actions::{
     AbortMultipartUpload, CompleteMultipartUpload, CreateMultipartUpload, UploadPart,
 };
 use time::OffsetDateTime;
 
 use objstore::{
-    BackendError, Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore,
-    ObjStoreError, ObjectMeta, ObjectMetaPage, Operation, Put, Resource, Result as ObjStoreResult,
-    UploadUrlArgs, ValueStream,
+    BackendError, ByteRange, Conditions, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs,
+    ObjStore, ObjStoreError, ObjectMeta, ObjectMetaPage, Operation, Put, Resource,
+    Result as ObjStoreResult, UploadUrlArgs, ValueStream,
 };
 
 use crate::{
@@ -1182,6 +1184,109 @@ impl ObjStore for S3ObjStore {
             }
             None => Ok(None),
         }
+    }
+
+    async fn get_range_stream(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> ObjStoreResult<Option<ValueStream>> {
+        if range.end.is_some_and(|end| end < range.start) {
+            return Err(ObjStoreError::InvalidRequest {
+                message: format!("invalid byte range for {key:?}: end precedes start"),
+                source: None,
+            });
+        }
+
+        if range.end == Some(range.start) {
+            let meta = match self.head_object(key).await? {
+                Some(meta) => meta,
+                None => return Ok(None),
+            };
+            let size = meta.size.ok_or_else(|| ObjStoreError::InvalidMetadata {
+                key: key.to_string(),
+                message: "object size is required for ranged reads".to_string(),
+                source: None,
+            })?;
+            range
+                .resolve(size)
+                .map_err(|message| ObjStoreError::InvalidRequest {
+                    message: format!("invalid byte range for {key:?}: {message}"),
+                    source: None,
+                })?;
+            return Ok(Some(Box::pin(futures::stream::empty())));
+        }
+
+        let s3_key = self.build_key(key);
+        let url = self
+            .state
+            .bucket
+            .get_object(Some(&self.state.creds), &s3_key)
+            .sign(std::time::Duration::from_secs(60 * 60));
+        let range_header = match range.end {
+            Some(end) => format!("bytes={}-{}", range.start, end - 1),
+            None => format!("bytes={}-", range.start),
+        };
+        tracing::trace!(%s3_key, %range_header, "loading object range from s3");
+        let response = self
+            .state
+            .client
+            .get(url)
+            .header(RANGE, range_header)
+            .send()
+            .await
+            .map_err(|source| Self::dispatch_error(Operation::GetStream, source))?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            self.ensure_bucket_exists().await?;
+            return Ok(None);
+        }
+        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            let meta = match self.head_object(key).await? {
+                Some(meta) => meta,
+                None => return Ok(None),
+            };
+            let size = meta.size.ok_or_else(|| ObjStoreError::InvalidMetadata {
+                key: key.to_string(),
+                message: "object size is required for ranged reads".to_string(),
+                source: None,
+            })?;
+            let resolved =
+                range
+                    .resolve(size)
+                    .map_err(|message| ObjStoreError::InvalidRequest {
+                        message: format!("invalid byte range for {key:?}: {message}"),
+                        source: None,
+                    })?;
+            if resolved.is_empty() {
+                return Ok(Some(Box::pin(futures::stream::empty())));
+            }
+        }
+        let response = Self::error_for_status(
+            response,
+            self.state.bucket.name(),
+            Operation::GetStream,
+            Some(Resource::Object {
+                key: key.to_string(),
+            }),
+        )
+        .await?;
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            return Err(ObjStoreError::Response {
+                operation: Operation::GetStream,
+                source: Some(
+                    std::io::Error::other(format!(
+                        "S3 ignored byte range request and returned {}",
+                        response.status()
+                    ))
+                    .into(),
+                ),
+            });
+        }
+        let stream = response
+            .bytes_stream()
+            .map_err(|source| Self::response_error(Operation::GetStream, source));
+        Ok(Some(Box::pin(stream)))
     }
 
     async fn get_with_meta(&self, key: &str) -> ObjStoreResult<Option<(Bytes, ObjectMeta)>> {

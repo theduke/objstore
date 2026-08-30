@@ -10,8 +10,8 @@ use url::Url;
 use sha2::Digest;
 
 use objstore::{
-    BackendError, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError,
-    ObjectMeta, ObjectMetaPage, Operation, Put, Result, UploadUrlArgs, ValueStream,
+    BackendError, ByteRange, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore,
+    ObjStoreError, ObjectMeta, ObjectMetaPage, Operation, Put, Result, UploadUrlArgs, ValueStream,
 };
 
 use crate::LogFsObjStoreConfig;
@@ -168,7 +168,11 @@ impl LogFsObjStore {
         .await
     }
 
-    async fn spawn_reader_stream(&self, key: String) -> Result<Option<ValueStream>> {
+    async fn spawn_reader_stream(
+        &self,
+        key: String,
+        range: Option<std::ops::Range<u64>>,
+    ) -> Result<Option<ValueStream>> {
         let log = self.state.log.clone();
         let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, LogFsError>>();
         let (tx, rx) = mpsc::channel::<Result<Bytes, LogFsError>>(8);
@@ -177,8 +181,34 @@ impl LogFsObjStore {
             let path = key.clone();
             match log.get_chunks(&path) {
                 Ok(mut reader) => {
+                    let mut remaining = range.as_ref().map(|range| range.end - range.start);
+                    if remaining == Some(0) {
+                        let _ = ready_tx.send(Ok(true));
+                        return;
+                    }
+                    if let Some(range) = &range
+                        && range.start > 0
+                        && let Err(error) = reader.skip_bytes(range.start)
+                    {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
                     let _ = ready_tx.send(Ok(true));
                     for chunk in reader.by_ref() {
+                        if remaining == Some(0) {
+                            break;
+                        }
+                        let chunk = chunk.map(|mut chunk| {
+                            if let Some(remaining) = remaining {
+                                chunk.truncate(remaining.min(chunk.len() as u64) as usize);
+                            }
+                            chunk
+                        });
+                        if let Ok(chunk) = &chunk
+                            && let Some(remaining) = &mut remaining
+                        {
+                            *remaining -= chunk.len() as u64;
+                        }
                         let chunk = chunk.map(Bytes::from);
                         if tx.blocking_send(chunk).is_err() {
                             break;
@@ -246,7 +276,26 @@ impl ObjStore for LogFsObjStore {
     }
 
     async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>> {
-        self.spawn_reader_stream(key.to_string()).await
+        self.spawn_reader_stream(key.to_string(), None).await
+    }
+
+    async fn get_range_stream(&self, key: &str, range: ByteRange) -> Result<Option<ValueStream>> {
+        let meta = match self.meta(key).await? {
+            Some(meta) => meta,
+            None => return Ok(None),
+        };
+        let size = meta.size.ok_or_else(|| ObjStoreError::InvalidMetadata {
+            key: key.to_string(),
+            message: "object size is required for ranged reads".to_string(),
+            source: None,
+        })?;
+        let range = range
+            .resolve(size)
+            .map_err(|message| ObjStoreError::InvalidRequest {
+                message: format!("invalid byte range for {key:?}: {message}"),
+                source: None,
+            })?;
+        self.spawn_reader_stream(key.to_string(), Some(range)).await
     }
 
     async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {
