@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 use objstore::{
-    Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta,
-    ObjectMetaPage, Put, Result, UploadUrlArgs, ValueStream,
+    ByteRange, Copy, DataSource, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError,
+    ObjectMeta, ObjectMetaPage, Put, Result, UploadUrlArgs, ValueStream,
 };
 use url::Url;
 
@@ -104,6 +104,24 @@ impl ObjStore for MemoryObjStore {
         } else {
             Ok(None)
         }
+    }
+
+    async fn get_range_stream(&self, key: &str, range: ByteRange) -> Result<Option<ValueStream>> {
+        let value = match self.get(key).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let range =
+            range
+                .resolve(value.len() as u64)
+                .map_err(|message| ObjStoreError::InvalidRequest {
+                    message: format!("invalid byte range for {key:?}: {message}"),
+                    source: None,
+                })?;
+        let value = value.slice(range.start as usize..range.end as usize);
+        Ok(Some(Box::pin(futures::stream::once(
+            async move { Ok(value) },
+        ))))
     }
 
     async fn get_with_meta(&self, key: &str) -> Result<Option<(Bytes, ObjectMeta)>> {

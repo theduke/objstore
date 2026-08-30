@@ -2,8 +2,8 @@ use bytes::Bytes;
 use futures::TryStreamExt as _;
 
 use crate::{
-    Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta, ObjectMetaPage,
-    Put, Resource, Result, UploadUrlArgs, ValueStream,
+    ByteRange, Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjStoreError, ObjectMeta,
+    ObjectMetaPage, Put, Resource, Result, UploadUrlArgs, ValueStream,
 };
 
 /// Wrapper that scopes all object store operations to a fixed key prefix.
@@ -283,6 +283,14 @@ where
     async fn get_stream(&self, key: &str) -> Result<Option<ValueStream>> {
         self.inner
             .get_stream(&self.prepend_prefix(key))
+            .await
+            .map_err(|err| self.map_error(err))
+            .map(|stream| stream.map(|stream| self.map_stream_errors(stream)))
+    }
+
+    async fn get_range_stream(&self, key: &str, range: ByteRange) -> Result<Option<ValueStream>> {
+        self.inner
+            .get_range_stream(&self.prepend_prefix(key), range)
             .await
             .map_err(|err| self.map_error(err))
             .map(|stream| stream.map(|stream| self.map_stream_errors(stream)))

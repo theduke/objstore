@@ -1,8 +1,8 @@
 use bytes::Bytes;
 
 use crate::{
-    Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage, Put, Result,
-    UploadUrlArgs, ValueStream,
+    ByteRange, Copy, DownloadUrlArgs, KeyPage, ListArgs, ObjStore, ObjectMeta, ObjectMetaPage, Put,
+    Result, UploadUrlArgs, ValueStream,
 };
 
 /// Wrapper for an object stores that logs operations with the `tracing` crate.
@@ -100,6 +100,28 @@ where
             Err(e) => {
                 tracing::error!(store = &self.name, key, error=%e, "get_stream::failed");
                 Err(e)
+            }
+        }
+    }
+
+    async fn get_range_stream(&self, key: &str, range: ByteRange) -> Result<Option<ValueStream>> {
+        match self.inner.get_range_stream(key, range).await {
+            Ok(Some(value)) => {
+                tracing::trace!(store = &self.name, key, ?range, "get_range_stream::ok");
+                Ok(Some(value))
+            }
+            Ok(None) => {
+                tracing::trace!(
+                    store = &self.name,
+                    key,
+                    ?range,
+                    "get_range_stream::not_found"
+                );
+                Ok(None)
+            }
+            Err(error) => {
+                tracing::error!(store = &self.name, key, ?range, %error, "get_range_stream::failed");
+                Err(error)
             }
         }
     }

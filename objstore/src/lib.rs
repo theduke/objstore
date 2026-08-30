@@ -13,6 +13,6 @@ pub use self::{
     builder::ObjStoreBuilder,
     error::{BackendError, BoxError, ObjStoreError, Operation, Resource, Result},
     provider::ObjStoreProvider,
-    store::{DynObjStore, ObjStore, ObjStoreExt},
+    store::{DynObjStore, GetStreamBuilder, ObjStore, ObjStoreExt},
     types::*,
 };

@@ -6,8 +6,8 @@
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt};
 use objstore::{
-    DataSource, ListArgs, ObjStore, ObjStoreError, ObjStoreExt, ObjectMeta, Put, SizedValueStream,
-    ValueStream,
+    ByteRange, DataSource, ListArgs, ObjStore, ObjStoreError, ObjStoreExt, ObjectMeta, Put,
+    SizedValueStream, ValueStream,
 };
 use pretty_assertions::assert_eq;
 use sha2::Digest as _;
@@ -41,6 +41,10 @@ pub async fn test_objstore(store: &impl ObjStore) {
     tracing::info!("running test_put_with_mime_type()");
     test_put_with_mime_type(store, &prefix).await;
     tracing::info!("finished test_put_with_mime_type()");
+
+    tracing::info!("running test_range_reads()");
+    test_range_reads(store, &prefix).await;
+    tracing::info!("finished test_range_reads()");
 
     let keys = store.list_all_keys(&prefix).await.unwrap();
     assert!(keys.is_empty());
@@ -151,6 +155,110 @@ async fn test_put_with_mime_type(store: &impl ObjStore, prefix: &str) {
     assert_eq!(loaded, value);
 
     store.delete(&key).await.unwrap();
+}
+
+async fn test_range_reads(store: &impl ObjStore, prefix: &str) {
+    let key = format!("{prefix}/range-{}", Uuid::new_v4());
+    let missing_key = format!("{prefix}/range-missing-{}", Uuid::new_v4());
+    let value = Bytes::from_static(b"abcdefghijklmnopqrstuvwxyz");
+    store.put(&key).bytes(value.clone()).await.unwrap();
+
+    assert_eq!(
+        store
+            .build_stream(&key)
+            .send()
+            .await
+            .unwrap()
+            .expect("range test object should exist")
+            .try_collect::<BytesMut>()
+            .await
+            .unwrap()
+            .freeze(),
+        value
+    );
+    assert_eq!(
+        store
+            .build_stream(&key)
+            .with_start(5)
+            .with_end(10)
+            .send()
+            .await
+            .unwrap()
+            .expect("range test object should exist")
+            .try_collect::<BytesMut>()
+            .await
+            .unwrap()
+            .freeze(),
+        Bytes::from_static(b"fghij")
+    );
+    let (meta, stream) = store
+        .build_stream(&key)
+        .with_end(3)
+        .send_with_meta()
+        .await
+        .unwrap()
+        .expect("range test object should exist");
+    assert_eq!(meta.size, Some(value.len() as u64));
+    assert_eq!(
+        stream.try_collect::<BytesMut>().await.unwrap().freeze(),
+        Bytes::from_static(b"abc")
+    );
+
+    assert_eq!(
+        store
+            .get_range(&key, ByteRange::bounded(5, 10))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"fghij"))
+    );
+    assert_eq!(
+        collect_range(store, &key, ByteRange::from_offset(20)).await,
+        Bytes::from_static(b"uvwxyz")
+    );
+    assert_eq!(
+        collect_range(store, &key, ByteRange::bounded(23, 100)).await,
+        Bytes::from_static(b"xyz")
+    );
+    assert_eq!(
+        collect_range(store, &key, ByteRange::bounded(26, 30)).await,
+        Bytes::new()
+    );
+    assert_eq!(
+        collect_range(store, &key, ByteRange::bounded(7, 7)).await,
+        Bytes::new()
+    );
+    assert!(
+        store
+            .get_range_stream(&missing_key, ByteRange::from_offset(0))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    for range in [ByteRange::bounded(10, 9), ByteRange::from_offset(27)] {
+        let error = match store.get_range_stream(&key, range).await {
+            Err(error) => error,
+            Ok(_) => panic!("invalid range {range:?} must fail"),
+        };
+        assert!(
+            matches!(error, ObjStoreError::InvalidRequest { .. }),
+            "expected InvalidRequest for {range:?}, got {error:?}"
+        );
+    }
+
+    store.delete(&key).await.unwrap();
+}
+
+async fn collect_range(store: &impl ObjStore, key: &str, range: ByteRange) -> Bytes {
+    store
+        .get_range_stream(key, range)
+        .await
+        .unwrap()
+        .expect("range test object should exist")
+        .try_collect::<BytesMut>()
+        .await
+        .unwrap()
+        .freeze()
 }
 
 /// Test storing an empty stream.
