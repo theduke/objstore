@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3](https://github.com/theduke/objstore/compare/objstore_memory-v0.1.0-alpha.2...objstore_memory-v0.1.0-alpha.3) - 2026-08-30
+
+### Added
+
+- Add range boundaries for streams
+
 ## [0.1.0-alpha.2](https://github.com/theduke/objstore/compare/objstore_memory-v0.1.0-alpha.1...objstore_memory-v0.1.0-alpha.2) - 2026-06-29
 
 ### Added

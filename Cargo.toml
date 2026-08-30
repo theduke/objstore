@@ -29,17 +29,17 @@ keywords = [
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/theduke/objstore"
 edition = "2024"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [workspace.dependencies]
 
 # Repo-local crates
-objstore = { path = "./objstore", version = "=0.1.0-alpha.2" }
-objstore_config = { path = "./objstore_config", version = "=0.1.0-alpha.2" }
-objstore_fs = { path = "./objstore_fs", version = "=0.1.0-alpha.2" }
+objstore = { path = "./objstore", version = "=0.1.0-alpha.3" }
+objstore_config = { path = "./objstore_config", version = "=0.1.0-alpha.3" }
+objstore_fs = { path = "./objstore_fs", version = "=0.1.0-alpha.3" }
 objstore_logfs = { path = "./objstore_logfs", version = "=0.1.0-alpha.2" }
-objstore_memory = { path = "./objstore_memory", version = "=0.1.0-alpha.2" }
-objstore_s3_light = { path = "./objstore_s3_light", version = "=0.1.0-alpha.2" }
+objstore_memory = { path = "./objstore_memory", version = "=0.1.0-alpha.3" }
+objstore_s3_light = { path = "./objstore_s3_light", version = "=0.1.0-alpha.3" }
 objstore_test = { path = "./objstore_test", version = "=0.1.0-alpha.2" }
 
 # External crates
