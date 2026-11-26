@@ -830,9 +830,7 @@ impl S3ObjStore {
 
         // Some S3 implementations (R2) reject an upload whose non-trailing parts
         // differ in length, so every part but the last is exactly PART_SIZE.
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            buffer.put_slice(&chunk);
+        loop {
             while buffer.len() >= Self::PART_SIZE {
                 let upload = UploadPart::new(
                     &self.state.bucket,
@@ -877,6 +875,10 @@ impl S3ObjStore {
                     .to_string();
                 etags.push(etag);
                 part_number += 1;
+            }
+            match stream.next().await {
+                Some(chunk) => buffer.put_slice(&chunk?),
+                None => break,
             }
         }
         // final part
@@ -2276,12 +2278,14 @@ mod tests {
     /// R2 rejects a multipart upload whose non-trailing parts differ in length
     /// (`InvalidPart`). A stream whose frames do not divide the part size must
     /// still be cut into parts of exactly `PART_SIZE`, with only the last one
-    /// shorter.
+    /// shorter. A frame larger than a part, including the first, is cut too.
     #[tokio::test]
     async fn test_s3_multipart_stream_sends_equal_non_trailing_parts() {
         use objstore::SizedValueStream;
 
-        const TOTAL: usize = 24 * 1024 * 1024;
+        const PART: usize = S3ObjStore::PART_SIZE;
+        const FIRST: usize = 2 * PART + 5;
+        const TOTAL: usize = 4 * PART + 12_345;
         const FRAME: usize = 10_000;
 
         let (addr, parts) = spawn_recording_multipart_server().await;
@@ -2291,9 +2295,13 @@ mod tests {
         .unwrap();
         let store = S3ObjStore::new(config).unwrap();
 
-        let frames = (0..TOTAL.div_ceil(FRAME))
-            .map(|i| Ok(Bytes::from(vec![b'a'; FRAME.min(TOTAL - i * FRAME)])))
-            .collect::<Vec<_>>();
+        let mut frames = vec![Ok(Bytes::from(vec![b'a'; FIRST]))];
+        let mut sent = FIRST;
+        while sent < TOTAL {
+            let size = FRAME.min(TOTAL - sent);
+            frames.push(Ok(Bytes::from(vec![b'a'; size])));
+            sent += size;
+        }
         let stream: ValueStream = futures::stream::iter(frames).boxed();
         let put = Put::new(
             "big",
@@ -2306,11 +2314,43 @@ mod tests {
         let parts = parts.lock().unwrap().clone();
         let numbers: Vec<u32> = parts.iter().map(|(number, _)| *number).collect();
         let sizes: Vec<usize> = parts.iter().map(|(_, size)| *size).collect();
-        assert_eq!(numbers, vec![1, 2, 3]);
+        assert_eq!(numbers, vec![1, 2, 3, 4, 5]);
         assert_eq!(
             sizes,
-            vec![S3ObjStore::PART_SIZE; 3],
+            vec![PART, PART, PART, PART, 12_345],
             "every non-trailing part must be exactly PART_SIZE"
         );
+    }
+
+    /// A stream that is one chunk larger than a part is cut into parts too,
+    /// rather than sent as a single oversized part.
+    #[tokio::test]
+    async fn test_s3_multipart_single_large_chunk_is_cut_into_parts() {
+        use objstore::SizedValueStream;
+
+        const PART: usize = S3ObjStore::PART_SIZE;
+
+        let (addr, parts) = spawn_recording_multipart_server().await;
+        let config = S3ObjStoreConfig::from_uri(&format!(
+            "s3://key:secret@{addr}/bucket?style=path&insecure&fetch_metadata_after_put=false"
+        ))
+        .unwrap();
+        let store = S3ObjStore::new(config).unwrap();
+
+        let frames = vec![Ok(Bytes::from(vec![b'a'; 2 * PART + 5]))];
+        let stream: ValueStream = futures::stream::iter(frames).boxed();
+        let put = Put::new(
+            "one-chunk",
+            DataSource::Stream(SizedValueStream::new_without_size(stream)),
+        );
+        store.send_put(put).await.unwrap();
+
+        let sizes: Vec<usize> = parts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, size)| *size)
+            .collect();
+        assert_eq!(sizes, vec![PART, PART, 5]);
     }
 }
