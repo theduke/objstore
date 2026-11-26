@@ -38,5 +38,5 @@ quick-xml = { version = "0.39", features = ["serialize"] }
 [dev-dependencies]
 objstore_test = { path = "../objstore_test" }
 pretty_assertions.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util"] }
 serde_json.workspace = true
