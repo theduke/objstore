@@ -828,10 +828,11 @@ impl S3ObjStore {
         let mut buffer = BytesMut::new();
         buffer.put_slice(&first_chunk);
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            buffer.put_slice(&chunk);
-            if buffer.len() >= Self::PART_SIZE {
+        // Cut parts at exactly PART_SIZE instead of flushing the whole buffer once it
+        // passes PART_SIZE: S3 accepts parts of varying size, but R2 rejects an
+        // upload whose non-trailing parts differ in length (`InvalidPart`).
+        loop {
+            while buffer.len() >= Self::PART_SIZE {
                 let upload = UploadPart::new(
                     &self.state.bucket,
                     Some(&self.state.creds),
@@ -840,7 +841,7 @@ impl S3ObjStore {
                     &upload_id,
                 );
                 let url = upload.sign(Self::DURATION);
-                let data = buffer.split().freeze();
+                let data = buffer.split_to(Self::PART_SIZE).freeze();
                 total_size += data.len() as u64;
                 let res = self
                     .state
@@ -875,6 +876,10 @@ impl S3ObjStore {
                     .to_string();
                 etags.push(etag);
                 part_number += 1;
+            }
+            match stream.next().await {
+                Some(chunk) => buffer.put_slice(&chunk?),
+                None => break,
             }
         }
         // final part
@@ -2165,5 +2170,188 @@ mod tests {
             .delete(&key)
             .await
             .expect("failed to clean up test object");
+    }
+
+    /// A minimal S3 endpoint that accepts one multipart upload and records the
+    /// size of every part it receives, in part-number order.
+    async fn spawn_recording_multipart_server() -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<Vec<(u32, usize)>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let parts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = parts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let parts = recorded.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    loop {
+                        // Read one request head.
+                        let head_end = loop {
+                            if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break end + 4;
+                            }
+                            let mut chunk = [0u8; 64 * 1024];
+                            match socket.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                        let mut lines = head.lines();
+                        let mut request_line = lines.next().unwrap().split(' ');
+                        let method = request_line.next().unwrap().to_string();
+                        let target = request_line.next().unwrap().to_string();
+                        let content_length = lines
+                            .filter_map(|line| line.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                            .unwrap_or(0);
+
+                        // Read the body.
+                        while buf.len() < head_end + content_length {
+                            let mut chunk = [0u8; 64 * 1024];
+                            match socket.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                        buf.drain(..head_end + content_length);
+
+                        let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
+                        let param = |name: &str| {
+                            query.split('&').find_map(|pair| {
+                                let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                                (k == name).then(|| v.to_string())
+                            })
+                        };
+                        let (status, extra_headers, body) = match method.as_str() {
+                            "POST" if param("uploads").is_some() => (
+                                "200 OK",
+                                String::new(),
+                                "<InitiateMultipartUploadResult><Bucket>bucket</Bucket>\
+                                 <Key>key</Key><UploadId>upload-1</UploadId>\
+                                 </InitiateMultipartUploadResult>"
+                                    .to_string(),
+                            ),
+                            "PUT" if param("partNumber").is_some() => {
+                                let number: u32 = param("partNumber").unwrap().parse().unwrap();
+                                parts.lock().unwrap().push((number, content_length));
+                                (
+                                    "200 OK",
+                                    format!("ETag: \"part-{number}\"\r\n"),
+                                    String::new(),
+                                )
+                            }
+                            "POST" if param("uploadId").is_some() => (
+                                "200 OK",
+                                String::new(),
+                                "<CompleteMultipartUploadResult><ETag>\"done\"</ETag>\
+                                 </CompleteMultipartUploadResult>"
+                                    .to_string(),
+                            ),
+                            "DELETE" => ("204 No Content", String::new(), String::new()),
+                            _ => ("400 Bad Request", String::new(), String::new()),
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if socket.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        (addr, parts)
+    }
+
+    /// R2 rejects a multipart upload whose non-trailing parts differ in length
+    /// (`InvalidPart`). A stream whose frames do not divide the part size must
+    /// still be cut into parts of exactly `PART_SIZE`, with only the last one
+    /// shorter. A frame larger than a part, including the first, is cut too.
+    #[tokio::test]
+    async fn test_s3_multipart_stream_sends_equal_non_trailing_parts() {
+        use objstore::SizedValueStream;
+
+        const PART: usize = S3ObjStore::PART_SIZE;
+        const FIRST: usize = 2 * PART + 5;
+        const TOTAL: usize = 4 * PART + 12_345;
+        const FRAME: usize = 10_000;
+
+        let (addr, parts) = spawn_recording_multipart_server().await;
+        let config = S3ObjStoreConfig::from_uri(&format!(
+            "s3://key:secret@{addr}/bucket?style=path&insecure&fetch_metadata_after_put=false"
+        ))
+        .unwrap();
+        let store = S3ObjStore::new(config).unwrap();
+
+        let mut frames = vec![Ok(Bytes::from(vec![b'a'; FIRST]))];
+        let mut sent = FIRST;
+        while sent < TOTAL {
+            let size = FRAME.min(TOTAL - sent);
+            frames.push(Ok(Bytes::from(vec![b'a'; size])));
+            sent += size;
+        }
+        let stream: ValueStream = futures::stream::iter(frames).boxed();
+        let put = Put::new(
+            "big",
+            DataSource::Stream(SizedValueStream::new_without_size(stream)),
+        );
+
+        let meta = store.send_put(put).await.unwrap();
+        assert_eq!(meta.size, Some(TOTAL as u64));
+
+        let parts = parts.lock().unwrap().clone();
+        let numbers: Vec<u32> = parts.iter().map(|(number, _)| *number).collect();
+        let sizes: Vec<usize> = parts.iter().map(|(_, size)| *size).collect();
+        assert_eq!(numbers, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            sizes,
+            vec![PART, PART, PART, PART, 12_345],
+            "every non-trailing part must be exactly PART_SIZE"
+        );
+    }
+
+    /// A stream that is one chunk larger than a part is cut into parts too,
+    /// rather than sent as a single oversized part.
+    #[tokio::test]
+    async fn test_s3_multipart_single_large_chunk_is_cut_into_parts() {
+        use objstore::SizedValueStream;
+
+        const PART: usize = S3ObjStore::PART_SIZE;
+
+        let (addr, parts) = spawn_recording_multipart_server().await;
+        let config = S3ObjStoreConfig::from_uri(&format!(
+            "s3://key:secret@{addr}/bucket?style=path&insecure&fetch_metadata_after_put=false"
+        ))
+        .unwrap();
+        let store = S3ObjStore::new(config).unwrap();
+
+        let frames = vec![Ok(Bytes::from(vec![b'a'; 2 * PART + 5]))];
+        let stream: ValueStream = futures::stream::iter(frames).boxed();
+        let put = Put::new(
+            "one-chunk",
+            DataSource::Stream(SizedValueStream::new_without_size(stream)),
+        );
+        store.send_put(put).await.unwrap();
+
+        let sizes: Vec<usize> = parts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, size)| *size)
+            .collect();
+        assert_eq!(sizes, vec![PART, PART, 5]);
     }
 }
