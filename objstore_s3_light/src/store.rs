@@ -828,8 +828,9 @@ impl S3ObjStore {
         let mut buffer = BytesMut::new();
         buffer.put_slice(&first_chunk);
 
-        // Some S3 implementations (R2) reject an upload whose non-trailing parts
-        // differ in length, so every part but the last is exactly PART_SIZE.
+        // Cut parts at exactly PART_SIZE instead of flushing the whole buffer once it
+        // passes PART_SIZE: S3 accepts parts of varying size, but R2 rejects an
+        // upload whose non-trailing parts differ in length (`InvalidPart`).
         loop {
             while buffer.len() >= Self::PART_SIZE {
                 let upload = UploadPart::new(
